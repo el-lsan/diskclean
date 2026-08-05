@@ -408,6 +408,76 @@ const ABSOLUTE_RULES = [
     safe: true,
   },
   {
+    id: 'lmstudio_models',
+    label: 'LM Studio models',
+    // Each publisher dir holds one or more models; list per model, not per
+    // publisher, so a single model can be removed.
+    base: path.join(HOME, '.lmstudio', 'models'),
+    children: true,
+    childDepth: 2,
+    childPattern: /^[A-Za-z0-9._@-]+$/,
+    regen: 're-downloadable from LM Studio',
+    safe: true,
+    note:
+      'Models are re-downloadable from LM Studio, so deleting one only costs the '
+      + 'download. Check for anything you fine-tuned or converted locally, since '
+      + 'that would not be on the hub.',
+    requireAppClosed: 'LM Studio',
+  },
+  {
+    id: 'huggingface_hub',
+    label: 'Hugging Face model cache',
+    base: path.join(HOME, '.cache', 'huggingface', 'hub'),
+    children: true,
+    childPattern: /^(models|datasets|spaces)--[A-Za-z0-9._-]+$/,
+    regen: 're-downloaded on next run',
+    safe: true,
+    note:
+      'Downloaded model weights (this is where MFLUX/diffusers keep FLUX). '
+      + 'Re-downloaded automatically on the next run, but these are large files, '
+      + 'so only clear one if you are done with that generator for a while.',
+  },
+  {
+    id: 'torch_hub',
+    label: 'PyTorch hub cache',
+    base: path.join(HOME, '.cache', 'torch', 'hub'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 're-downloaded on next run',
+    safe: true,
+  },
+  {
+    id: 'uv_cache',
+    label: 'uv (Python) cache',
+    base: path.join(HOME, '.cache', 'uv'),
+    children: true,
+    childPattern: /^(archive|git|sdists|builds|simple|wheels|interpreter)-v\d+$/,
+    regen: 'uv re-downloads and rebuilds',
+    safe: true,
+    note:
+      'Prefer `uv cache prune` for routine cleanup, which removes only '
+      + 'unused entries. Deleting a whole directory here is also safe, it just '
+      + 'forces more re-downloading later.',
+  },
+  {
+    id: 'pip_cache',
+    label: 'pip cache',
+    base: path.join(HOME, 'Library', 'Caches', 'pip'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 'pip re-downloads',
+    safe: true,
+  },
+  {
+    id: 'playwright_cache',
+    label: 'Playwright browsers',
+    base: path.join(HOME, 'Library', 'Caches', 'ms-playwright'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 'npx playwright install',
+    safe: true,
+  },
+  {
     id: 'telegram_temp',
     label: 'Telegram temp files',
     base: path.join(

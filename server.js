@@ -56,6 +56,46 @@ async function dirSize(p) {
 }
 
 /**
+ * Size cache, keyed by directory path.
+ *
+ * `du` cost tracks FILE COUNT, not bytes. Measured here: the 31GB Hugging Face
+ * cache holds 66 files and sizes in 0.01s, while ~/.cache/uv holds 811,029 files
+ * and takes 15.5s. So a few package caches dominate every scan.
+ *
+ * A directory's mtime changes when entries are added or removed directly inside
+ * it, which is enough to catch "a new model appeared" or "a version dir was
+ * deleted". It does NOT catch a file growing deeper inside the tree, so entries
+ * expire on a TTL as well, and a rescan can be forced.
+ */
+const sizeCache = new Map(); // path -> { mtimeMs, at, sizes: Map }
+const SIZE_TTL_MS = 10 * 60 * 1000;
+
+async function dirMtime(p) {
+  try {
+    return (await fsp.stat(p)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/** Cached wrapper around childSizes(). */
+async function childSizesCached(base, { force = false } = {}) {
+  const mtimeMs = await dirMtime(base);
+  const hit = sizeCache.get(base);
+  if (
+    !force &&
+    hit &&
+    hit.mtimeMs === mtimeMs &&
+    Date.now() - hit.at < SIZE_TTL_MS
+  ) {
+    return hit.sizes;
+  }
+  const sizes = await childSizes(base);
+  sizeCache.set(base, { mtimeMs, at: Date.now(), sizes });
+  return sizes;
+}
+
+/**
  * Sizes for every direct child of `base` in ONE `du` pass.
  *
  * Measured on this machine against ~/.gradle/caches: one `du -d 1` took 3.08s
@@ -415,7 +455,7 @@ async function scanProjects() {
 }
 
 /** Scan the absolute cache rules. */
-async function scanCaches() {
+async function scanCaches({ force = false } = {}) {
   const groups = await mapLimit(S.ABSOLUTE_RULES, 4, async (rule) => {
     if (!(await isDir(rule.base))) return null;
 
@@ -434,13 +474,41 @@ async function scanCaches() {
           (!rule.childPattern || rule.childPattern.test(c.name)),
       );
 
-      // One du pass for the whole directory instead of one per child.
-      const all = await childSizes(rule.base);
+      /*
+       * Some caches nest one level deeper than the useful unit. LM Studio groups
+       * models under a publisher directory, so listing publishers would force an
+       * all-or-nothing choice across every model by that publisher. childDepth
+       * lets a rule list grandchildren instead.
+       */
+      const depth = rule.childDepth || 1;
+      let targets = eligible.map((c) => path.join(rule.base, c.name));
+
+      if (depth > 1) {
+        const deeper = [];
+        for (const parent of targets) {
+          let sub;
+          try {
+            sub = await fsp.readdir(parent, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          const kids = sub.filter((c) => c.isDirectory() && !c.isSymbolicLink());
+          // A parent with no subdirectories is itself the unit.
+          if (kids.length === 0) deeper.push(parent);
+          else for (const k of kids) deeper.push(path.join(parent, k.name));
+        }
+        targets = deeper;
+      }
+
+      // One du pass per parent directory, then look each target up.
+      const all = await childSizesCached(rule.base, { force });
       const sized = await Promise.all(
-        eligible.map(async (c) => {
-          const p = path.join(rule.base, c.name);
+        targets.map(async (p) => {
           const size = all.has(p) ? all.get(p) : await dirSize(p);
-          return { name: c.name, path: p, size, sizeHuman: humanBytes(size) };
+          // Show the path relative to the base, so a nested model reads as
+          // "publisher/model" rather than losing its context.
+          const name = path.relative(rule.base, p);
+          return { name, path: p, size, sizeHuman: humanBytes(size) };
         }),
       );
       entries.push(...sized.filter((s) => s.size > 0).sort((a, b) => b.size - a.size));
@@ -502,7 +570,7 @@ async function scanReportOnly() {
 
 /* ------------------------------------------------------------- simulators */
 
-async function listSimulators() {
+async function listSimulators({ force = false } = {}) {
   const devicesRoot = path.join(
     S.HOME,
     'Library',
@@ -537,7 +605,7 @@ async function listSimulators() {
 
   // One du pass covers every simulator directory. Measured at 6.57s for all 33
   // devices, versus ~2.9s per device individually.
-  const all = await childSizes(devicesRoot);
+  const all = await childSizesCached(devicesRoot, { force });
   const sized = flat.map((d) => {
     const p = path.join(devicesRoot, d.udid);
     const size = all.get(p) || 0;
@@ -571,7 +639,7 @@ const WIPEABLE_AVD_FILES = [
   'snapshots',
 ];
 
-async function listEmulators() {
+async function listEmulators({ force = false } = {}) {
   const avdRoot = path.join(S.HOME, '.android', 'avd');
   if (!(await isDir(avdRoot))) return { available: false, avds: [] };
 
@@ -584,7 +652,7 @@ async function listEmulators() {
 
   const avdDirs = entries.filter((e) => e.isDirectory() && e.name.endsWith('.avd'));
   // One du pass for all AVD directories.
-  const avdSizes = await childSizes(avdRoot);
+  const avdSizes = await childSizesCached(avdRoot, { force });
 
   const sized = await mapLimit(avdDirs, 4, async (e) => {
     const p = path.join(avdRoot, e.name);
@@ -737,10 +805,35 @@ async function verifyCacheTarget(ruleId, targetPath) {
     return null;
   }
 
-  if (path.dirname(abs) !== rule.base) {
-    return 'Target is not a direct child of the cache directory.';
+  /*
+   * The target must sit exactly `childDepth` levels below the base. Checking the
+   * exact depth (rather than mere containment) keeps a crafted request from
+   * reaching an arbitrary file deep inside a cache.
+   */
+  const depth = rule.childDepth || 1;
+  const rel = path.relative(rule.base, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return 'Target is not inside the cache directory.';
   }
-  if (rule.childPattern && !rule.childPattern.test(path.basename(abs))) {
+  const parts = rel.split(path.sep);
+  if (parts.length > depth) {
+    return `Target is nested too deeply under ${rule.label}.`;
+  }
+  // A shallower target is allowed only when that directory has no children of
+  // its own, matching how the scan lists it as the deletable unit.
+  if (parts.length < depth) {
+    try {
+      const sub = await fsp.readdir(abs, { withFileTypes: true });
+      if (sub.some((c) => c.isDirectory() && !c.isSymbolicLink())) {
+        return `Target is a container under ${rule.label}; select its entries instead.`;
+      }
+    } catch {
+      return 'Cannot inspect target directory.';
+    }
+  }
+
+  // The first path segment must always match the rule's pattern.
+  if (rule.childPattern && !rule.childPattern.test(parts[0])) {
     return `Target name does not match the allowed pattern for ${rule.label}.`;
   }
   if (rule.requireAppClosed && (await isAppRunning(rule.requireAppClosed))) {
@@ -777,6 +870,10 @@ async function performDelete({ kind, ruleId, targetPath, useTrash }) {
   } catch (err) {
     return { path: gate.resolved, ok: false, error: String(err.message || err) };
   }
+
+  // Cached child sizes for the containing directories are now stale.
+  sizeCache.delete(path.dirname(gate.resolved));
+  sizeCache.delete(path.dirname(path.dirname(gate.resolved)));
 
   return { path: gate.resolved, ok: true, freed: size, freedHuman: humanBytes(size) };
 }
@@ -986,13 +1083,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && route === '/api/scan') {
+      // ?force=1 re-measures everything, ignoring the size cache.
+      const force = url.searchParams.get('force') === '1';
       const [disk, projects, caches, reportOnly, sims, emus] = await Promise.all([
         diskStatus(),
         scanProjects(),
-        scanCaches(),
+        scanCaches({ force }),
         scanReportOnly(),
-        listSimulators(),
-        listEmulators(),
+        listSimulators({ force }),
+        listEmulators({ force }),
       ]);
       sendJson(res, 200, {
         disk,

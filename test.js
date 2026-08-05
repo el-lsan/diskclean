@@ -100,6 +100,20 @@ check('.git segment',
   [path.join(HOME, 'Documents', 'Github')], false);
 check('empty path', '', ['/'], false);
 
+console.log('\n== Nested-cache rules must declare a depth the gate can enforce ==');
+{
+  // A rule listing grandchildren (e.g. LM Studio publisher/model) must not let
+  // the base or an intermediate container become a delete target.
+  const nested = S.ABSOLUTE_RULES.filter((r) => (r.childDepth || 1) > 1);
+  for (const r of nested) {
+    check(`refuse base of nested rule ${r.id}`, r.base, [r.base], false);
+  }
+  if (nested.length === 0) {
+    console.log('ok    (no nested-depth rules defined)');
+    passes += 1;
+  }
+}
+
 console.log('\n== Legitimate targets must be allowed ==');
 check('sandbox node_modules', path.join(SANDBOX, 'proj', 'node_modules'),
   [SANDBOX], true);

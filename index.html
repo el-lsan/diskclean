@@ -193,6 +193,8 @@
 
   <div class="toolbar">
     <button id="rescan" class="primary">Rescan</button>
+    <button id="remeasure" class="sm"
+      title="Ignore cached sizes and walk every tree again">Re-measure</button>
     <button id="expandAll" class="sm">Expand all</button>
     <button id="collapseAll" class="sm">Collapse all</button>
     <span id="authPill" class="tag warn">Locked</span>
@@ -576,10 +578,10 @@ function refreshSimBtn() {
 
 /* ---------------------------------------------------------------- actions */
 
-async function scan() {
-  setStatus('Scanning (du can take a minute)…', true);
+async function scan(force) {
+  setStatus(force ? 'Re-measuring everything…' : 'Scanning…', true);
   try {
-    const r = await api('/api/scan');
+    const r = await api('/api/scan' + (force ? '?force=1' : ''));
     if (!r.ok) throw new Error((r.body && r.body.error) || 'HTTP ' + r.status);
     DATA = r.body;
     sel.clear();
@@ -645,7 +647,8 @@ $('modalBg').onclick = (e) => {
   if (e.target === $('modalBg')) $('modalBg').classList.remove('show');
 };
 
-$('rescan').onclick = scan;
+$('rescan').onclick = () => scan(false);
+$('remeasure').onclick = () => scan(true);
 $('lockBtn').onclick = async () => {
   await api('/api/auth/revoke', { method: 'POST' });
   updateAuthPill();
