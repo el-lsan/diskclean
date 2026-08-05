@@ -1189,6 +1189,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const { useTrash } = body;
+      const stream = body.stream === true;
       if (targets.length === 0) {
         sendJson(res, 400, { error: 'No targets provided.' });
         return;
@@ -1197,6 +1198,84 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'Too many targets in one request.' });
         return;
       }
+      /*
+       * Streaming mode emits NDJSON: one JSON object per line, flushed as each
+       * target finishes. A big delete can take minutes, and a bare spinner tells
+       * the user nothing about whether it is progressing or wedged.
+       *
+       * NDJSON rather than SSE because the client just reads the body
+       * incrementally, so there is no reconnect/event-framing machinery and the
+       * same handler shape serves both modes.
+       */
+      if (stream) {
+        res.writeHead(200, {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Cache-Control': 'no-store',
+          // Disable proxy buffering, so lines are not held back.
+          'X-Accel-Buffering': 'no',
+        });
+
+        const send = (obj) => res.write(`${JSON.stringify(obj)}\n`);
+
+        // Tell the client the plan up front so it can render a real progress bar.
+        const plannedBytes = targets.reduce((a, t) => a + (Number(t.size) || 0), 0);
+        send({
+          type: 'start',
+          total: targets.length,
+          plannedBytes,
+          useTrash,
+        });
+
+        const results = [];
+        let freedSoFar = 0;
+        let aborted = false;
+        req.on('close', () => { aborted = true; });
+
+        for (let i = 0; i < targets.length; i += 1) {
+          const t = targets[i];
+          // The browser went away; stop rather than keep deleting unobserved.
+          if (aborted) break;
+
+          send({ type: 'progress', index: i, path: t.path, label: t.label || null });
+
+          const r = await performDelete({
+            kind: t.kind,
+            ruleId: t.ruleId,
+            targetPath: t.path,
+            useTrash,
+          });
+          results.push(r);
+          if (r.ok) freedSoFar += r.freed || 0;
+
+          send({
+            type: 'done',
+            index: i,
+            path: r.path,
+            ok: r.ok,
+            error: r.error || null,
+            freed: r.freed || 0,
+            freedHuman: humanBytes(r.freed || 0),
+            freedTotal: freedSoFar,
+            freedTotalHuman: humanBytes(freedSoFar),
+            okCount: results.filter((x) => x.ok).length,
+            failCount: results.filter((x) => !x.ok).length,
+          });
+        }
+
+        send({
+          type: 'complete',
+          aborted,
+          results,
+          freed: freedSoFar,
+          freedHuman: humanBytes(freedSoFar),
+          okCount: results.filter((r) => r.ok).length,
+          failCount: results.filter((r) => !r.ok).length,
+          inTrash: useTrash,
+        });
+        res.end();
+        return;
+      }
+
       const results = [];
       for (const t of targets) {
         results.push(

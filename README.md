@@ -216,6 +216,19 @@ Result: about 14s on a rescan, 35s cold, on a machine with ~145 GB of
 reclaimable material. Since mtime does not catch a file growing deeper inside a
 tree, **Re-measure** forces a full walk when a number looks stale.
 
+## Live progress
+
+A large delete can take minutes, so it reports as it goes rather than showing a
+spinner. The panel opens *before* the password prompt, so the OS dialog never
+appears over a page that looks idle, and then shows a progress bar, a running
+count, bytes freed so far, ok/failed tallies, the path currently being deleted,
+and a scrolling log where each item is ticked off as it completes. Failures
+appear inline with their reason instead of a single alert at the end.
+
+The endpoint streams NDJSON (one JSON object per line, flushed per item). If you
+close the browser mid-run, the server notices and stops rather than continuing to
+delete unobserved.
+
 ## Keyboard shortcuts
 
 | Key | Action |
