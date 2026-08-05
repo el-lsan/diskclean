@@ -1,0 +1,12 @@
+#!/bin/bash
+# diskclean launcher: starts the local server and opens the GUI.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "diskclean needs Node.js on your PATH." >&2
+  exit 1
+fi
+
+exec node "$DIR/server.js" "$@"

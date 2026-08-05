@@ -1,0 +1,584 @@
+'use strict';
+
+/**
+ * Safety layer for diskclean.
+ *
+ * Design rule: deletion is allowed ONLY when a path matches an explicit
+ * allowlist rule AND survives every deny check. There is no code path that
+ * deletes an arbitrary caller-supplied path. If a rule is not listed here,
+ * the path is not deletable, no matter what the UI asks for.
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const HOME = os.homedir();
+
+/** Absolute paths that must never be deleted, even if a rule matches. */
+const PROTECTED_EXACT = new Set(
+  [
+    '/',
+    '/System',
+    '/Library',
+    '/usr',
+    '/bin',
+    '/sbin',
+    '/etc',
+    '/var',
+    '/opt',
+    '/Applications',
+    '/Users',
+    '/Volumes',
+    '/private',
+    HOME,
+    path.join(HOME, 'Library'),
+    path.join(HOME, 'Documents'),
+    path.join(HOME, 'Desktop'),
+    path.join(HOME, 'Downloads'),
+    path.join(HOME, 'Pictures'),
+    path.join(HOME, 'Movies'),
+    path.join(HOME, 'Music'),
+    path.join(HOME, '.ssh'),
+    path.join(HOME, '.gnupg'),
+    path.join(HOME, '.gradle'),
+    path.join(HOME, '.android'),
+    path.join(HOME, 'Library', 'Developer'),
+    path.join(HOME, 'Library', 'Android'),
+    path.join(HOME, 'Library', 'Android', 'sdk'),
+    path.join(HOME, 'Library', 'Caches'),
+    path.join(HOME, 'Library', 'Application Support'),
+    path.join(HOME, 'Library', 'Group Containers'),
+    path.join(HOME, 'Library', 'Containers'),
+    path.join(HOME, 'Library', 'CloudStorage'),
+    path.join(HOME, 'Library', 'Keychains'),
+    path.join(HOME, 'Library', 'Preferences'),
+    // Project container roots. Children are deletable, the roots never are.
+    path.join(HOME, 'Documents', 'Github'),
+    path.join(HOME, 'AndroidStudioProjects'),
+    path.join(HOME, '.android'),
+    path.join(HOME, '.android', 'avd'),
+    path.join(HOME, '.npm'),
+    path.join(HOME, '.gradle', 'caches'),
+    path.join(HOME, '.gradle', 'wrapper'),
+    path.join(HOME, '.gradle', 'wrapper', 'dists'),
+    path.join(HOME, '.gradle', 'daemon'),
+    path.join(HOME, 'Library', 'Developer', 'Xcode'),
+    path.join(HOME, 'Library', 'Developer', 'Xcode', 'DerivedData'),
+    path.join(HOME, 'Library', 'Developer', 'Xcode', 'iOS DeviceSupport'),
+    path.join(HOME, 'Library', 'Developer', 'Xcode', 'Archives'),
+    path.join(HOME, 'Library', 'Developer', 'CoreSimulator'),
+    path.join(HOME, 'Library', 'Developer', 'CoreSimulator', 'Devices'),
+    path.join(HOME, 'Library', 'Android', 'sdk', 'ndk'),
+    path.join(HOME, 'Library', 'Android', 'sdk', 'system-images'),
+    path.join(HOME, 'Library', 'Android', 'sdk', 'build-tools'),
+    path.join(HOME, 'Library', 'Caches', 'CocoaPods'),
+    path.join(HOME, 'Library', 'Caches', 'ReactNative'),
+    path.join(HOME, 'Library', 'Caches', 'Yarn'),
+  ].map((p) => path.resolve(p)),
+);
+
+/**
+ * A rule's own base directory is never itself deletable. Enforced separately
+ * from PROTECTED_EXACT so adding a rule can't silently create a hole.
+ */
+function isRuleBase(resolved) {
+  return RULE_BASES.has(resolved);
+}
+
+/**
+ * Any path that starts with one of these is refused outright. Guards against a
+ * rule being mis-specified later and reaching somewhere it must never touch.
+ */
+const PROTECTED_PREFIXES = [
+  '/System/',
+  '/usr/',
+  '/bin/',
+  '/sbin/',
+  '/etc/',
+  '/private/var/db/',
+  '/Library/Apple/',
+  '/Applications/',
+  path.join(HOME, 'Library', 'Keychains') + path.sep,
+  path.join(HOME, 'Library', 'Preferences') + path.sep,
+  path.join(HOME, '.ssh') + path.sep,
+  path.join(HOME, '.gnupg') + path.sep,
+  path.join(HOME, 'Library', 'CloudStorage') + path.sep,
+];
+
+/** Names that must never appear as a path segment of a delete target. */
+const PROTECTED_SEGMENTS = new Set([
+  '.git',
+  '.ssh',
+  '.gnupg',
+  '.env',
+  'Keychains',
+  'CloudStorage',
+]);
+
+/** Minimum path depth. Blocks shallow, high-blast-radius targets. */
+const MIN_DEPTH = 3;
+
+/**
+ * Deletable categories.
+ *
+ * kind:
+ *   'project'  -> a named directory inside a detected RN/node project
+ *   'absolute' -> a specific known cache dir outside projects
+ *
+ * Each project rule names an exact relative subpath. We never glob into a
+ * project, so source directories can never be selected.
+ */
+const PROJECT_RULES = [
+  {
+    id: 'node_modules',
+    rel: 'node_modules',
+    label: 'node_modules',
+    regen: 'yarn install',
+    safe: true,
+  },
+  {
+    id: 'ios_pods',
+    rel: path.join('ios', 'Pods'),
+    label: 'ios/Pods',
+    regen: 'pod install',
+    safe: true,
+  },
+  {
+    id: 'ios_build',
+    rel: path.join('ios', 'build'),
+    label: 'ios/build',
+    regen: 'Xcode build',
+    safe: true,
+  },
+  {
+    id: 'android_build',
+    rel: path.join('android', 'build'),
+    label: 'android/build',
+    regen: 'gradle build',
+    safe: true,
+  },
+  {
+    id: 'android_app_build',
+    rel: path.join('android', 'app', 'build'),
+    label: 'android/app/build',
+    regen: 'gradle build',
+    safe: true,
+  },
+  {
+    id: 'android_gradle',
+    rel: path.join('android', '.gradle'),
+    label: 'android/.gradle',
+    regen: 'gradle build',
+    safe: true,
+  },
+  {
+    id: 'android_cxx',
+    rel: path.join('android', 'app', '.cxx'),
+    label: 'android/app/.cxx',
+    regen: 'gradle build',
+    safe: true,
+  },
+  {
+    id: 'dart_tool',
+    rel: '.dart_tool',
+    label: '.dart_tool',
+    regen: 'flutter pub get',
+    safe: true,
+  },
+  {
+    id: 'next_build',
+    rel: '.next',
+    label: '.next',
+    regen: 'next build',
+    safe: true,
+  },
+  {
+    id: 'expo',
+    rel: '.expo',
+    label: '.expo',
+    regen: 'expo start',
+    safe: true,
+  },
+  {
+    id: 'turbo',
+    rel: '.turbo',
+    label: '.turbo',
+    regen: 'turbo build',
+    safe: true,
+  },
+  {
+    id: 'venv',
+    rel: 'venv',
+    label: 'venv',
+    regen: 'python -m venv venv',
+    safe: true,
+  },
+  {
+    id: 'build_root',
+    rel: 'build',
+    label: 'build',
+    regen: 'project build',
+    safe: true,
+    // A `build` directory is only offered when git confirms it is ignored, so a
+    // project that commits files under build/ is never touched. Enforced in
+    // scanProject() in server.js.
+    requireGitignored: true,
+  },
+];
+
+/** Roots we are willing to scan for projects. */
+const PROJECT_ROOTS = [
+  path.join(HOME, 'Documents', 'Github'),
+  path.join(HOME, 'AndroidStudioProjects'),
+];
+
+/**
+ * How many levels below a root we look for projects. Monorepo-ish containers
+ * (e.g. a folder of websites, each at <container>/<site>/website) need more
+ * than one level. Kept small so a scan stays fast and predictable.
+ */
+const PROJECT_SCAN_DEPTH = 3;
+
+/**
+ * Directory names the project scanner must never descend into. Prevents
+ * treating an artifact directory as a project (`.next/package.json` exists,
+ * and every package inside node_modules has one).
+ */
+const SCAN_SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.next',
+  '.nuxt',
+  '.expo',
+  '.turbo',
+  '.dart_tool',
+  '.gradle',
+  '.cxx',
+  'Pods',
+  'build',
+  'dist',
+  'out',
+  'venv',
+  '.venv',
+  '__pycache__',
+  'DerivedData',
+  'vendor',
+  'Carthage',
+  '.yarn',
+  '.pnpm-store',
+  '.cache',
+]);
+
+/**
+ * Absolute cache rules. `path` must be an exact directory. Children are only
+ * enumerated when `children: true`, and then each child is individually
+ * validated against the same containment rules.
+ */
+const ABSOLUTE_RULES = [
+  {
+    id: 'gradle_caches_version',
+    label: 'Gradle version caches',
+    base: path.join(HOME, '.gradle', 'caches'),
+    children: true,
+    // Only version-numbered dirs and known transient caches.
+    childPattern: /^(\d+\.\d+(\.\d+)?|build-cache-\d+|jars-\d+|transforms-\d+|journal-\d+|kotlin-dsl|modules-2)$/,
+    regen: 'gradle re-downloads on next build',
+    safe: true,
+    note: 'Version dirs for Gradle releases you no longer use are pure waste.',
+  },
+  {
+    id: 'gradle_wrapper_dists',
+    label: 'Gradle wrapper distributions',
+    base: path.join(HOME, '.gradle', 'wrapper', 'dists'),
+    children: true,
+    childPattern: /^gradle-[\d.]+(-(bin|all))?$/,
+    regen: 'wrapper re-downloads on next build',
+    safe: true,
+  },
+  {
+    id: 'gradle_daemon',
+    label: 'Gradle daemon logs',
+    base: path.join(HOME, '.gradle', 'daemon'),
+    children: true,
+    childPattern: /^\d+\.\d+(\.\d+)?$/,
+    regen: 'recreated automatically',
+    safe: true,
+  },
+  {
+    id: 'xcode_derived',
+    label: 'Xcode DerivedData',
+    base: path.join(HOME, 'Library', 'Developer', 'Xcode', 'DerivedData'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 'Xcode rebuilds',
+    safe: true,
+  },
+  {
+    id: 'xcode_device_support',
+    label: 'Xcode iOS DeviceSupport',
+    base: path.join(HOME, 'Library', 'Developer', 'Xcode', 'iOS DeviceSupport'),
+    children: true,
+    childPattern: /^[A-Za-z0-9m .()_-]+$/,
+    regen: 'regenerated when you attach a device',
+    safe: true,
+  },
+  {
+    id: 'xcode_archives',
+    label: 'Xcode Archives',
+    base: path.join(HOME, 'Library', 'Developer', 'Xcode', 'Archives'),
+    children: true,
+    childPattern: /^[0-9-]+$/,
+    regen: 'NOT regenerable, these are your shipped builds',
+    safe: false,
+    note: 'Archives are release builds you may need for symbolication. Review carefully.',
+  },
+  {
+    id: 'android_ndk',
+    label: 'Android NDK versions',
+    base: path.join(HOME, 'Library', 'Android', 'sdk', 'ndk'),
+    children: true,
+    childPattern: /^[\d.]+$/,
+    regen: 'SDK manager re-downloads',
+    safe: false,
+    note: 'Keep the NDK version your projects pin. Deleting the wrong one breaks builds until re-downloaded.',
+  },
+  {
+    id: 'android_system_images',
+    label: 'Android system images',
+    base: path.join(HOME, 'Library', 'Android', 'sdk', 'system-images'),
+    children: true,
+    childPattern: /^android-[\w.-]+$/,
+    regen: 'SDK manager re-downloads',
+    safe: false,
+    note: 'Needed by emulators using that API level.',
+  },
+  {
+    id: 'android_build_tools',
+    label: 'Android build-tools',
+    base: path.join(HOME, 'Library', 'Android', 'sdk', 'build-tools'),
+    children: true,
+    childPattern: /^[\d.]+(-rc\d+)?$/,
+    regen: 'SDK manager re-downloads',
+    safe: false,
+    note: 'Keep the version your Gradle config requires.',
+  },
+  {
+    id: 'cocoapods_cache',
+    label: 'CocoaPods cache',
+    base: path.join(HOME, 'Library', 'Caches', 'CocoaPods'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 'pod install re-downloads',
+    safe: true,
+  },
+  {
+    id: 'rn_cache',
+    label: 'React Native cache',
+    base: path.join(HOME, 'Library', 'Caches', 'ReactNative'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 'recreated on next bundle',
+    safe: true,
+  },
+  {
+    id: 'npm_cache',
+    label: 'npm cache (_cacache)',
+    base: path.join(HOME, '.npm', '_cacache'),
+    children: false,
+    regen: 'npm re-downloads',
+    safe: true,
+  },
+  {
+    id: 'yarn_cache',
+    label: 'Yarn cache',
+    base: path.join(HOME, 'Library', 'Caches', 'Yarn'),
+    children: true,
+    childPattern: /^[A-Za-z0-9._-]+$/,
+    regen: 'yarn re-downloads',
+    safe: true,
+  },
+  {
+    id: 'metro_cache',
+    label: 'Metro bundler temp',
+    base: path.join(os.tmpdir()),
+    children: true,
+    childPattern: /^(metro-|haste-map-|react-native-packager-)[A-Za-z0-9._-]*$/,
+    regen: 'recreated on next bundle',
+    safe: true,
+  },
+  {
+    id: 'telegram_temp',
+    label: 'Telegram temp files',
+    base: path.join(
+      HOME,
+      'Library',
+      'Group Containers',
+      '6N38VWS5BX.ru.keepcoder.Telegram',
+      'appstore',
+      'temp',
+    ),
+    children: false,
+    regen: 'recreated by Telegram',
+    safe: true,
+    requireAppClosed: 'Telegram',
+  },
+];
+
+/** Reports only. Never deletable through this tool. */
+const REPORT_ONLY = [
+  {
+    id: 'telegram_db',
+    label: 'Telegram message database',
+    base: path.join(
+      HOME,
+      'Library',
+      'Group Containers',
+      '6N38VWS5BX.ru.keepcoder.Telegram',
+      'appstore',
+    ),
+    reason:
+      'This is Telegram\'s live SQLite database (db_sqlite), not a media cache. That is why the in-app cleaner only reports a few hundred MB. Deleting it erases local chat history and can corrupt the running app. The only safe way to shrink it is inside Telegram: log the unused account out (Settings > right-click account > Log out), which drops that account\'s database. Do that in the app, not here.',
+  },
+  {
+    id: 'simulator_devices',
+    label: 'iOS Simulator devices',
+    base: path.join(HOME, 'Library', 'Developer', 'CoreSimulator', 'Devices'),
+    reason:
+      'Simulator data is managed by simctl and hardlinked against runtimes. Deleting these directories by hand corrupts the simulator index. Use the Simulators panel in this tool, which calls simctl instead.',
+  },
+];
+
+/**
+ * Every rule base and project root, derived automatically. A base directory is
+ * a container we enumerate; it must never be a delete target itself.
+ */
+const RULE_BASES = new Set(
+  [
+    ...PROJECT_ROOTS,
+    ...ABSOLUTE_RULES.map((r) => r.base),
+    ...REPORT_ONLY.map((r) => r.base),
+  ].map((p) => path.resolve(p)),
+);
+
+function realpathSafe(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/** True if child is strictly inside parent (no equality, no sibling prefix). */
+function isInside(parent, child) {
+  const rel = path.relative(parent, child);
+  return (
+    rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel)
+  );
+}
+
+/**
+ * The single gate every deletion must pass.
+ * Returns { ok: true, resolved } or { ok: false, reason }.
+ */
+function validateDeletion(targetPath, allowedRoots) {
+  if (typeof targetPath !== 'string' || targetPath.length === 0) {
+    return { ok: false, reason: 'Empty path.' };
+  }
+  if (targetPath.includes('\0')) {
+    return { ok: false, reason: 'Null byte in path.' };
+  }
+
+  const abs = path.resolve(targetPath);
+
+  // Resolve symlinks so a link cannot point outside an allowed root.
+  const real = realpathSafe(abs);
+  if (!real) {
+    return { ok: false, reason: 'Path does not exist.' };
+  }
+
+  // Refuse if the path itself is a symlink (delete the real thing, not a link).
+  let lst;
+  try {
+    lst = fs.lstatSync(abs);
+  } catch {
+    return { ok: false, reason: 'Cannot stat path.' };
+  }
+  if (lst.isSymbolicLink()) {
+    return { ok: false, reason: 'Refusing to follow a symlink.' };
+  }
+  if (!lst.isDirectory() && !lst.isFile()) {
+    return { ok: false, reason: 'Not a regular file or directory.' };
+  }
+
+  if (real !== abs) {
+    return {
+      ok: false,
+      reason: 'Path contains a symlink; refusing to act on an aliased location.',
+    };
+  }
+
+  if (PROTECTED_EXACT.has(real)) {
+    return { ok: false, reason: `Protected location: ${real}` };
+  }
+
+  // A container we enumerate is never itself a target.
+  if (isRuleBase(real)) {
+    return {
+      ok: false,
+      reason: `Refusing to delete a container directory: ${real}`,
+    };
+  }
+
+  for (const prefix of PROTECTED_PREFIXES) {
+    if (real === prefix.slice(0, -1) || real.startsWith(prefix)) {
+      return { ok: false, reason: `Protected area: ${prefix}` };
+    }
+  }
+
+  const segments = real.split(path.sep).filter(Boolean);
+  if (segments.length < MIN_DEPTH) {
+    return {
+      ok: false,
+      reason: `Path too shallow (depth ${segments.length}, minimum ${MIN_DEPTH}).`,
+    };
+  }
+  for (const seg of segments) {
+    if (PROTECTED_SEGMENTS.has(seg)) {
+      return { ok: false, reason: `Path contains protected segment "${seg}".` };
+    }
+  }
+
+  // Must live under at least one allowed root for the requested rule.
+  const roots = (allowedRoots || []).map((r) => path.resolve(r));
+  const contained = roots.some((r) => isInside(r, real));
+  if (!contained) {
+    return {
+      ok: false,
+      reason: 'Path is not inside an allowlisted root for this operation.',
+    };
+  }
+
+  // Never delete a volume root or a mount point.
+  if (real.split(path.sep).length <= 2) {
+    return { ok: false, reason: 'Refusing to act on a volume root.' };
+  }
+
+  return { ok: true, resolved: real };
+}
+
+module.exports = {
+  HOME,
+  RULE_BASES,
+  isRuleBase,
+  PROJECT_RULES,
+  PROJECT_ROOTS,
+  PROJECT_SCAN_DEPTH,
+  SCAN_SKIP_DIRS,
+  ABSOLUTE_RULES,
+  REPORT_ONLY,
+  PROTECTED_EXACT,
+  validateDeletion,
+  isInside,
+  realpathSafe,
+};

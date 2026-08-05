@@ -1,0 +1,122 @@
+'use strict';
+
+/**
+ * Safety tests for diskclean. Run: node test.js
+ *
+ * These assert that the validation gate refuses dangerous paths. Run this
+ * after ANY change to safety.js. A failure here means the tool could delete
+ * something it must never touch.
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const S = require('./safety');
+
+const HOME = os.homedir();
+// realpath the tmp dir: on macOS os.tmpdir() sits under /var, which is a
+// symlink to /private/var. The gate correctly refuses aliased paths, so the
+// sandbox must use the already-resolved location.
+const SANDBOX = path.join(
+  fs.realpathSync(os.tmpdir()),
+  `diskclean-test-${process.pid}`,
+);
+
+let failures = 0;
+let passes = 0;
+
+function check(desc, target, roots, shouldAllow) {
+  const r = S.validateDeletion(target, roots);
+  const got = r.ok ? 'ALLOW' : 'REJECT';
+  const want = shouldAllow ? 'ALLOW' : 'REJECT';
+  if (got !== want) {
+    console.log(`FAIL  ${desc}\n      got ${got}, want ${want}` +
+      (r.reason ? ` :: ${r.reason}` : ''));
+    failures += 1;
+  } else {
+    console.log(`ok    ${desc}` + (r.reason ? ` (${r.reason})` : ''));
+    passes += 1;
+  }
+}
+
+function setup() {
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+  fs.mkdirSync(path.join(SANDBOX, 'proj', 'node_modules', 'junk'), { recursive: true });
+  fs.mkdirSync(path.join(SANDBOX, 'precious'), { recursive: true });
+  fs.writeFileSync(path.join(SANDBOX, 'precious', 'data.txt'), 'important');
+  try {
+    fs.symlinkSync(
+      path.join(SANDBOX, 'precious'),
+      path.join(SANDBOX, 'proj', 'node_modules', 'link'),
+    );
+  } catch { /* symlink may fail on odd filesystems */ }
+}
+
+function teardown() {
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+}
+
+setup();
+
+console.log('\n== System and home locations must be refused ==');
+for (const p of [
+  '/', '/System', '/usr', '/bin', '/etc', '/var', '/Applications',
+  '/Users', '/Volumes', '/private',
+  HOME,
+  path.join(HOME, 'Library'),
+  path.join(HOME, 'Documents'),
+  path.join(HOME, 'Desktop'),
+  path.join(HOME, 'Downloads'),
+  path.join(HOME, '.ssh'),
+  path.join(HOME, '.gnupg'),
+  path.join(HOME, '.gradle'),
+  path.join(HOME, '.android'),
+  path.join(HOME, 'Library', 'Keychains'),
+  path.join(HOME, 'Library', 'Android', 'sdk'),
+  path.join(HOME, 'Library', 'Developer'),
+]) {
+  check(`refuse ${p}`, p, ['/'], false);
+}
+
+console.log('\n== Project roots and rule containers must be refused ==');
+for (const base of S.RULE_BASES) {
+  check(`refuse container ${base}`, base, [base], false);
+}
+
+console.log('\n== Traversal, symlinks, and malformed input must be refused ==');
+check('null byte', `${SANDBOX}/proj\0/node_modules`, [SANDBOX], false);
+check('relative escape to home',
+  path.join(HOME, 'Documents', 'Github', 'Shelfify', '..', '..', '..'), ['/'], false);
+check('relative escape out of sandbox',
+  path.join(SANDBOX, 'proj', 'node_modules', '..', '..', '..'), [SANDBOX], false);
+check('symlink target', path.join(SANDBOX, 'proj', 'node_modules', 'link'),
+  [SANDBOX], false);
+check('outside the allowed root', path.join(SANDBOX, 'precious'),
+  [path.join(SANDBOX, 'proj')], false);
+check('nonexistent path', path.join(SANDBOX, 'nope-does-not-exist'),
+  [SANDBOX], false);
+check('.git segment',
+  path.join(HOME, 'Documents', 'Github', 'Shelfify', '.git'),
+  [path.join(HOME, 'Documents', 'Github')], false);
+check('empty path', '', ['/'], false);
+
+console.log('\n== Legitimate targets must be allowed ==');
+check('sandbox node_modules', path.join(SANDBOX, 'proj', 'node_modules'),
+  [SANDBOX], true);
+
+const gradleVersioned = path.join(HOME, '.gradle', 'caches', '9.3.1');
+if (fs.existsSync(gradleVersioned)) {
+  check('gradle version cache dir', gradleVersioned,
+    [path.join(HOME, '.gradle', 'caches')], true);
+}
+
+const shelfifyNm = path.join(HOME, 'Documents', 'Github', 'Shelfify', 'node_modules');
+if (fs.existsSync(shelfifyNm)) {
+  check('real project node_modules', shelfifyNm,
+    [path.join(HOME, 'Documents', 'Github')], true);
+}
+
+teardown();
+
+console.log(`\n${passes} passed, ${failures} failed\n`);
+process.exit(failures > 0 ? 1 : 0);

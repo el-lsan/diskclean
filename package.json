@@ -1,0 +1,28 @@
+{
+  "name": "diskclean",
+  "version": "1.0.0",
+  "description": "Local web GUI to find and safely reclaim disk space used by mobile development caches",
+  "main": "server.js",
+  "bin": {
+    "diskclean": "./diskclean"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "disk-space",
+    "cache",
+    "cleanup",
+    "react-native",
+    "gradle",
+    "xcode",
+    "macos"
+  ],
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
