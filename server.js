@@ -201,10 +201,51 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+/* --------------------------------------------------------- capabilities */
+
+const IS_MAC = process.platform === 'darwin';
+
+/**
+ * Cache of "is this command available", so we probe once per run.
+ * A machine without Xcode has no `xcrun`; a fresh machine may have no `git`.
+ * Every optional feature checks here instead of failing at call time.
+ */
+const binCache = new Map();
+
+async function hasCommand(name) {
+  if (binCache.has(name)) return binCache.get(name);
+  let ok = false;
+  try {
+    await execFileAsync('command', ['-v', name], { shell: '/bin/sh', timeout: 5000 });
+    ok = true;
+  } catch {
+    ok = false;
+  }
+  binCache.set(name, ok);
+  return ok;
+}
+
+/** Open a URL in the default browser, per platform. Never fatal. */
+function openInBrowser(url) {
+  const cmd = IS_MAC ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+  const args = process.platform === 'win32' ? ['', url] : [url];
+  try {
+    execFile(cmd, args, () => {});
+  } catch {
+    /* the URL is printed either way */
+  }
+}
+
 /* ------------------------------------------------------------ app running */
 
-/** Check whether a macOS app is currently running, by process name. */
+/**
+ * Check whether an app is currently running, by process name.
+ * Returns false when pgrep is unavailable, which only means we cannot prove an
+ * app is running. Rules that require an app to be closed stay conservative by
+ * being skipped entirely on such a machine (see scanCaches).
+ */
 async function isAppRunning(name) {
+  if (!(await hasCommand('pgrep'))) return false;
   try {
     const { stdout } = await execFileAsync('pgrep', ['-x', name], {
       timeout: 5000,
@@ -352,7 +393,15 @@ async function findProjects() {
   return projects;
 }
 
+/**
+ * Is relPath gitignored in this project?
+ *
+ * Returns false when git is unavailable or the directory is not a repo, which is
+ * the safe direction: a rule that requires the path to be ignored is then simply
+ * not offered, rather than being offered without the check having run.
+ */
 async function isGitignored(projectPath, relPath) {
+  if (!(await hasCommand('git'))) return false;
   try {
     await execFileAsync('git', ['-C', projectPath, 'check-ignore', '-q', relPath], {
       timeout: 5000,
@@ -527,8 +576,15 @@ async function scanCaches({ force = false } = {}) {
     if (entries.length === 0) return null;
 
     let blocked = null;
-    if (rule.requireAppClosed && (await isAppRunning(rule.requireAppClosed))) {
-      blocked = `${rule.requireAppClosed} is running. Quit it before clearing.`;
+    if (rule.requireAppClosed) {
+      if (!(await hasCommand('pgrep'))) {
+        // We cannot prove the app is closed, so do not offer the deletion.
+        blocked =
+          `Cannot check whether ${rule.requireAppClosed} is running on this `
+          + 'machine (pgrep not available), so this is left alone.';
+      } else if (await isAppRunning(rule.requireAppClosed)) {
+        blocked = `${rule.requireAppClosed} is running. Quit it before clearing.`;
+      }
     }
 
     const total = entries.reduce((a, b) => a + b.size, 0);
@@ -578,6 +634,11 @@ async function listSimulators({ force = false } = {}) {
     'CoreSimulator',
     'Devices',
   );
+  // No Xcode (or not macOS) means no simulators. Not an error.
+  if (!IS_MAC || !(await hasCommand('xcrun'))) {
+    return { available: false, devices: [], unavailableCount: 0, total: 0 };
+  }
+
   let parsed;
   try {
     const { stdout } = await execFileAsync(
@@ -587,7 +648,7 @@ async function listSimulators({ force = false } = {}) {
     );
     parsed = JSON.parse(stdout);
   } catch {
-    return { available: false, devices: [], unavailableCount: 0 };
+    return { available: false, devices: [], unavailableCount: 0, total: 0 };
   }
 
   const flat = [];
@@ -703,7 +764,12 @@ async function listEmulators({ force = false } = {}) {
 
 async function diskStatus() {
   try {
-    const { stdout } = await execFileAsync('df', ['-k', '/System/Volumes/Data'], {
+    // On modern macOS the user data lives on a separate volume from /.
+    // Elsewhere (or on older macOS) fall back to the home directory's volume.
+    const target = IS_MAC && (await exists('/System/Volumes/Data'))
+      ? '/System/Volumes/Data'
+      : S.HOME;
+    const { stdout } = await execFileAsync('df', ['-k', target], {
       timeout: 10000,
     });
     const line = stdout.trim().split('\n')[1] || '';
@@ -733,6 +799,11 @@ async function diskStatus() {
  * we validate the path first and reject quotes/backslashes defensively.
  */
 async function trashPath(p) {
+  if (!IS_MAC) {
+    throw new Error(
+      'Moving to Trash is only supported on macOS. Use permanent delete instead.',
+    );
+  }
   if (/["\\]/.test(p)) {
     throw new Error('Refusing to trash a path containing quotes or backslashes.');
   }
@@ -1108,7 +1179,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && route === '/api/delete') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const targets = Array.isArray(body.targets) ? body.targets : [];
-      const useTrash = body.useTrash !== false; // default: Trash
+      // Require an explicit boolean. A missing field must never be guessed in
+      // either direction: assuming Trash silently changes behavior for a caller
+      // that meant permanent, and assuming permanent is unrecoverable.
+      if (typeof body.useTrash !== 'boolean') {
+        sendJson(res, 400, {
+          error: 'useTrash must be explicitly true (Trash) or false (permanent).',
+        });
+        return;
+      }
+      const { useTrash } = body;
       if (targets.length === 0) {
         sendJson(res, 400, { error: 'No targets provided.' });
         return;
@@ -1183,28 +1263,179 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-function start(port, attemptsLeft) {
-  server.once('error', (err) => {
-    if (err.code === 'EADDRINUSE' && attemptsLeft > 0) {
-      start(port + 1, attemptsLeft - 1);
-      return;
+/**
+ * Identify whatever already holds our port.
+ *
+ * Silently hopping to the next free port (the previous behavior) is the worst
+ * option: you end up with orphaned servers you never notice, each holding an
+ * authorization grace window. So we stop and say what is there.
+ */
+async function whoHasPort(port) {
+  try {
+    const { stdout } = await execFileAsync(
+      'lsof',
+      ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcn'],
+      { timeout: 5000 },
+    );
+    // -F output is one field per line, prefixed by a tag character.
+    const procs = [];
+    let cur = null;
+    for (const line of stdout.split('\n')) {
+      const tag = line[0];
+      const val = line.slice(1);
+      if (tag === 'p') {
+        cur = { pid: Number(val), command: '' };
+        procs.push(cur);
+      } else if (tag === 'c' && cur) {
+        cur.command = val;
+      }
     }
-    process.stderr.write(`\n  Could not start diskclean: ${err.message}\n\n`);
+    return procs.filter((p) => Number.isFinite(p.pid));
+  } catch {
+    return [];
+  }
+}
+
+/** Is this PID one of our own server processes? */
+async function isOurServer(pid) {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'command=', '-p', String(pid)], {
+      timeout: 5000,
+    });
+    return stdout.includes('diskclean') && stdout.includes('server.js');
+  } catch {
+    return false;
+  }
+}
+
+function usage() {
+  process.stdout.write(`
+  diskclean - inspect and reclaim development disk space
+
+  Usage: diskclean [options]
+
+    --port <n>    Port to listen on (default ${PORT})
+    --replace     Stop an existing diskclean on this port and take over
+    --no-open     Do not open a browser
+    --help        Show this message
+
+  Environment:
+    DISKCLEAN_PORT   Same as --port
+
+`);
+}
+
+async function start() {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h')) {
+    usage();
+    process.exit(0);
+  }
+
+  const portIdx = argv.indexOf('--port');
+  const port =
+    portIdx >= 0 && argv[portIdx + 1] ? Number(argv[portIdx + 1]) : PORT;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    process.stderr.write(`\n  Invalid port: ${argv[portIdx + 1]}\n\n`);
+    process.exit(1);
+  }
+  const replace = argv.includes('--replace');
+  const noOpen = argv.includes('--no-open');
+
+  const holders = await whoHasPort(port);
+  if (holders.length > 0) {
+    const ours = [];
+    for (const h of holders) {
+      if (await isOurServer(h.pid)) ours.push(h);
+    }
+
+    // Something else owns the port. Never touch another program's process.
+    if (ours.length === 0) {
+      const list = holders.map((h) => `${h.command} (pid ${h.pid})`).join(', ');
+      process.stderr.write(
+        `\n  Port ${port} is in use by ${list}.\n` +
+        `  That is not a diskclean process, so it will not be touched.\n` +
+        `  Start on another port:  diskclean --port ${port + 1}\n\n`,
+      );
+      process.exit(1);
+    }
+
+    if (!replace) {
+      const list = ours.map((h) => `pid ${h.pid}`).join(', ');
+      process.stderr.write(
+        `\n  diskclean is already running on port ${port} (${list}).\n\n` +
+        `  Open it:        http://${HOST}:${port}\n` +
+        `  Replace it:     diskclean --replace\n` +
+        `  Use a new port: diskclean --port ${port + 1}\n\n`,
+      );
+      process.exit(1);
+    }
+
+    // --replace: shut our own old instance down politely, then confirm.
+    for (const h of ours) {
+      process.stdout.write(`  Stopping existing diskclean (pid ${h.pid})…\n`);
+      try {
+        process.kill(h.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+    const freed = await waitForPortFree(port, 5000);
+    if (!freed) {
+      process.stderr.write(
+        `\n  Could not free port ${port}. Stop the process by hand, or use --port.\n\n`,
+      );
+      process.exit(1);
+    }
+  }
+
+  server.once('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      process.stderr.write(
+        `\n  Port ${port} was taken while starting. Try again, or use --port.\n\n`,
+      );
+    } else if (err.code === 'EACCES') {
+      process.stderr.write(
+        `\n  Not allowed to listen on port ${port}. Pick a port above 1024.\n\n`,
+      );
+    } else {
+      process.stderr.write(`\n  Could not start diskclean: ${err.message}\n\n`);
+    }
     process.exit(1);
   });
+
   server.listen(port, HOST, () => {
     ACTIVE_PORT = port;
     const url = `http://${HOST}:${port}`;
     process.stdout.write(`\n  diskclean running at ${url}\n`);
-    process.stdout.write('  Deletions require your macOS password.\n');
+    process.stdout.write('  Deletions require your login password.\n');
     process.stdout.write('  Press Ctrl+C to stop.\n\n');
-    execFile('open', [url], () => {});
+    if (!noOpen) openInBrowser(url);
   });
 }
 
-start(PORT, 20);
+/** Poll until nothing is listening on the port, or we give up. */
+async function waitForPortFree(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const holders = await whoHasPort(port);
+    if (holders.length === 0) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
 
-process.on('SIGINT', () => {
-  process.stdout.write('\n  Stopped.\n');
-  process.exit(0);
+start().catch((err) => {
+  process.stderr.write(`\n  Startup failed: ${err.message}\n\n`);
+  process.exit(1);
 });
+
+function shutdown(signal) {
+  process.stdout.write(`\n  Stopped (${signal}).\n`);
+  server.close(() => process.exit(0));
+  // Do not hang on keep-alive connections.
+  setTimeout(() => process.exit(0), 1000).unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

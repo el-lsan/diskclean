@@ -2,10 +2,22 @@
 # diskclean launcher: starts the local server and opens the GUI.
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this script through any symlinks, so `clean` (a symlink in ~/bin)
+# still finds server.js in the real tool directory. Avoids readlink -f, which
+# is not available on stock macOS.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *)  SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$TARGET" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "diskclean needs Node.js on your PATH." >&2
+  echo "Install it with:  brew install node" >&2
   exit 1
 fi
 

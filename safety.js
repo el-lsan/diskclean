@@ -53,9 +53,6 @@ const PROTECTED_EXACT = new Set(
     path.join(HOME, 'Library', 'CloudStorage'),
     path.join(HOME, 'Library', 'Keychains'),
     path.join(HOME, 'Library', 'Preferences'),
-    // Project container roots. Children are deletable, the roots never are.
-    path.join(HOME, 'Documents', 'Github'),
-    path.join(HOME, 'AndroidStudioProjects'),
     path.join(HOME, '.android'),
     path.join(HOME, '.android', 'avd'),
     path.join(HOME, '.npm'),
@@ -227,11 +224,119 @@ const PROJECT_RULES = [
   },
 ];
 
-/** Roots we are willing to scan for projects. */
-const PROJECT_ROOTS = [
+/**
+ * Roots we are willing to scan for projects.
+ *
+ * Candidates cover the usual places people keep code; only the ones that
+ * actually exist on this machine are used, so copying the tool to another
+ * machine works without editing anything. Override with DISKCLEAN_ROOTS
+ * (colon-separated absolute paths) or a "roots" array in ~/.diskclean.json.
+ */
+const CANDIDATE_PROJECT_ROOTS = [
   path.join(HOME, 'Documents', 'Github'),
+  path.join(HOME, 'Documents', 'GitHub'),
+  path.join(HOME, 'Documents', 'git'),
+  path.join(HOME, 'Documents', 'Projects'),
+  path.join(HOME, 'Documents', 'code'),
+  path.join(HOME, 'Developer'),
+  path.join(HOME, 'Development'),
+  path.join(HOME, 'Projects'),
+  path.join(HOME, 'projects'),
+  path.join(HOME, 'code'),
+  path.join(HOME, 'src'),
+  path.join(HOME, 'repos'),
+  path.join(HOME, 'git'),
+  path.join(HOME, 'work'),
+  path.join(HOME, 'dev'),
+  path.join(HOME, 'workspace'),
   path.join(HOME, 'AndroidStudioProjects'),
+  path.join(HOME, 'StudioProjects'),
+  path.join(HOME, 'IdeaProjects'),
 ];
+
+/**
+ * A configured root must be an existing directory inside the home folder.
+ * Keeping roots under HOME means a typo in config cannot point the scanner at
+ * a system location.
+ */
+function isUsableRoot(p) {
+  const abs = path.resolve(p);
+  if (abs === HOME) return false;
+  const rel = path.relative(HOME, abs);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return false;
+  try {
+    return fs.statSync(abs).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Expand a leading ~ so hand-written config paths work as people expect. */
+function expandHome(p) {
+  if (p === '~') return HOME;
+  if (p.startsWith('~/')) return path.join(HOME, p.slice(2));
+  return p;
+}
+
+function readConfiguredRoots() {
+  // 1. Environment variable wins.
+  const env = process.env.DISKCLEAN_ROOTS;
+  if (env) {
+    return env.split(':').map((s) => expandHome(s.trim())).filter(Boolean);
+  }
+  // 2. Optional config file.
+  try {
+    const raw = fs.readFileSync(path.join(HOME, '.diskclean.json'), 'utf8');
+    const cfg = JSON.parse(raw);
+    if (Array.isArray(cfg.roots)) {
+      return cfg.roots
+        .filter((r) => typeof r === 'string')
+        .map((r) => expandHome(r.trim()))
+        .filter(Boolean);
+    }
+  } catch {
+    /* no config, or unreadable/invalid: fall through to auto-detection */
+  }
+  return null;
+}
+
+function resolveProjectRoots() {
+  const configured = readConfiguredRoots();
+  const list = configured || CANDIDATE_PROJECT_ROOTS;
+  const usable = list.map((p) => path.resolve(p)).filter(isUsableRoot);
+
+  /*
+   * Deduplicate by the real inode, not by string. macOS filesystems are
+   * case-insensitive by default, so ~/Documents/Github and ~/Documents/GitHub
+   * are the SAME directory and would otherwise be scanned twice. realpath also
+   * collapses symlinked roots pointing at one place.
+   */
+  const byId = new Map();
+  for (const p of usable) {
+    let key;
+    try {
+      const real = fs.realpathSync(p);
+      const st = fs.statSync(real);
+      key = `${st.dev}:${st.ino}`;
+    } catch {
+      key = p;
+    }
+    // Keep the first spelling we saw, so ordering stays predictable.
+    if (!byId.has(key)) byId.set(key, p);
+  }
+  const unique = [...byId.values()];
+
+  // Drop any root nested inside another, so a project is not scanned twice.
+  return unique.filter(
+    (a) => !unique.some((b) => {
+      if (b === a) return false;
+      const rel = path.relative(b, a);
+      return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    }),
+  );
+}
+
+const PROJECT_ROOTS = resolveProjectRoots();
 
 /**
  * How many levels below a root we look for projects. Monorepo-ish containers
@@ -525,6 +630,9 @@ const REPORT_ONLY = [
  */
 const RULE_BASES = new Set(
   [
+    // Every candidate root, not just the ones present here, so the protection
+    // does not depend on which directories happen to exist on this machine.
+    ...CANDIDATE_PROJECT_ROOTS,
     ...PROJECT_ROOTS,
     ...ABSOLUTE_RULES.map((r) => r.base),
     ...REPORT_ONLY.map((r) => r.base),

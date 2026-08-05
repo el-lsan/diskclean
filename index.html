@@ -242,11 +242,15 @@ const sel = new Map(); // path -> {kind, ruleId, path, size}
 const openCards = new Set();
 
 /**
- * Deletion method. 'trash' is recoverable but slow for huge file counts,
- * because Finder moves every file individually. 'permanent' is instant but
- * final. The choice is always shown, never buried in a checkbox.
+ * Deletion method.
+ *
+ * Default is 'permanent', because everything this tool offers is regenerable
+ * build output or a re-downloadable cache, and Trash is actively counterproductive
+ * for it: Finder moves hundreds of thousands of small files one by one, and the
+ * space is not freed until the Trash is emptied. 'trash' stays one click away for
+ * anything you want to be able to restore.
  */
-let deleteMode = 'trash';
+let deleteMode = 'permanent';
 
 /** Trashing this many files gets painfully slow, so we warn above it. */
 const SLOW_TRASH_BYTES = 2 * 1024 * 1024 * 1024;
