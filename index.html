@@ -133,6 +133,30 @@
   .slowwarn { background: color-mix(in srgb, var(--warn) 14%, transparent);
     border-left: 3px solid var(--warn); padding: 9px 12px; border-radius: 6px;
     font-size: 12.5px; margin: 12px 0 0; }
+  .okwarn { background: color-mix(in srgb, var(--ok) 12%, transparent);
+    border-left: 3px solid var(--ok); padding: 9px 12px; border-radius: 6px;
+    font-size: 12.5px; margin: 12px 0 0; }
+
+  /* Full location, shown once per card rather than on every row. */
+  .pathline { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; color: var(--dim); margin: 0; padding: 7px 14px;
+    border-bottom: 1px solid var(--line); word-break: break-all;
+    background: color-mix(in srgb, var(--dim) 6%, transparent); }
+  .sec > .pathline { border: 1px solid var(--line); border-radius: 7px;
+    margin-bottom: 10px; }
+
+  .vsep { width: 1px; height: 20px; background: var(--line);
+    display: inline-block; margin: 0 3px; }
+
+  .row.blocked { opacity: .5; }
+  .row.blocked input { cursor: not-allowed; }
+
+  kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 5px; color: var(--dim);
+    background: var(--panel2); }
+  .shortcuts { color: var(--dim); font-size: 12px; margin: 0 0 16px; }
+  .shortcuts kbd { margin: 0 2px; }
 
   .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.6);
     display: none; align-items: center; justify-content: center;
@@ -176,6 +200,11 @@
     <span class="spacer"></span>
     <span id="status" class="muted"></span>
   </div>
+
+  <p class="shortcuts"><kbd>R</kbd> rescan
+    · <kbd>E</kbd> expand all · <kbd>C</kbd> collapse all
+    · <kbd>D</kbd> deselect all · <kbd>M</kbd> switch delete method
+    · <kbd>Esc</kbd> close dialog</p>
 
   <div id="content"></div>
 </div>
@@ -313,6 +342,28 @@ function toggleSel(item, on) {
   refreshFooter();
 }
 
+/**
+ * Set many checkboxes at once and sync the selection in one pass.
+ * Updating the Map directly (instead of firing a change event per box) keeps
+ * bulk actions over hundreds of rows instant.
+ */
+function setBoxes(boxes, on) {
+  for (const c of boxes) {
+    if (c.disabled && on) continue;
+    c.checked = on;
+    const item = {
+      kind: c.dataset.kind,
+      ruleId: c.dataset.rule,
+      path: c.dataset.path,
+      size: Number(c.dataset.size) || 0,
+      safe: c.dataset.safe === '1',
+    };
+    if (on) sel.set(item.path, item);
+    else sel.delete(item.path);
+  }
+  refreshFooter();
+}
+
 /* ------------------------------------------------------------- rendering */
 
 function renderDisk(d) {
@@ -330,9 +381,11 @@ function renderDisk(d) {
 function cardRow(item, kind) {
   const checked = sel.has(item.path) ? 'checked' : '';
   const unsafe = item.safe === false ? ' unsafe' : '';
-  return `<div class="row${unsafe}">
+  const disabled = item.blocked ? 'disabled' : '';
+  return `<div class="row${unsafe}${item.blocked ? ' blocked' : ''}">
     <input type="checkbox" data-kind="${esc(kind)}" data-rule="${esc(item.ruleId)}"
-      data-path="${esc(item.path)}" data-size="${item.size}" ${checked} />
+      data-path="${esc(item.path)}" data-size="${item.size}"
+      data-safe="${item.safe === false ? '0' : '1'}" ${checked} ${disabled} />
     <span class="lbl">${esc(item.label)}</span>
     ${item.regen ? `<span class="rg">${esc(item.regen)}</span>` : ''}
     ${item.safe === false ? '<span class="tag warn">review</span>' : ''}
@@ -347,8 +400,14 @@ function renderProjects(list) {
     ${human(total)} reclaimable</span></h2>
     <p class="hint">Each row is a regenerable artifact directory. Source files,
       .git, and anything not listed here are never touched.</p>
-    <div class="toolbar"><button class="sm" id="selAllProj">Select all projects</button>
-      <button class="sm" id="selNodeMods">Select all node_modules</button></div>`;
+    <div class="toolbar">
+      <button class="sm" data-selall="project">Select all</button>
+      <button class="sm" data-deselall="project">Deselect all</button>
+      <span class="vsep"></span>
+      <button class="sm" data-selrule="node_modules">All node_modules</button>
+      <button class="sm" data-selrule="android_app_build">All android builds</button>
+      <button class="sm" data-selrule="ios_pods">All Pods</button>
+    </div>`;
   for (const p of list) {
     const open = openCards.has(p.path) ? ' open' : '';
     h += `<div class="card${open}" data-card="${esc(p.path)}">
@@ -356,9 +415,10 @@ function renderProjects(list) {
         <span class="chev">${open ? '▾' : '▸'}</span>
         <span class="nm">${esc(p.name)}</span>
         <span class="tag">${p.items.length} items</span>
-        <button class="sm" data-selproj="${esc(p.path)}">Select all</button>
+        <button class="sm" data-seltoggle="${esc(p.path)}">Toggle all</button>
         <span class="sz">${esc(p.totalHuman)}</span>
       </div><div class="rows">
+      <p class="pathline">${esc(p.path)}</p>
       ${p.items.map((i) => cardRow(i, 'project')).join('')}
       </div></div>`;
   }
@@ -370,7 +430,12 @@ function renderCaches(list) {
   const total = list.reduce((a, b) => a + b.total, 0);
   let h = `<div class="sec"><h2>Global caches <span class="tot">${human(total)}</span></h2>
     <p class="hint">Shared tool caches. Items marked "review" are needed by
-      builds that pin that version, so read the note before selecting.</p>`;
+      builds that pin that version, so read the note before selecting.</p>
+    <div class="toolbar">
+      <button class="sm" data-selsafe="cache">Select safe only</button>
+      <button class="sm" data-selall="cache">Select all</button>
+      <button class="sm" data-deselall="cache">Deselect all</button>
+    </div>`;
   for (const g of list) {
     const open = openCards.has(g.ruleId) ? ' open' : '';
     h += `<div class="card${open}" data-card="${esc(g.ruleId)}">
@@ -379,45 +444,82 @@ function renderCaches(list) {
         <span class="nm">${esc(g.label)}</span>
         ${g.safe ? '<span class="tag ok">safe</span>' : '<span class="tag warn">review</span>'}
         ${g.blocked ? '<span class="tag warn">blocked</span>' : ''}
+        <button class="sm" data-seltoggle="${esc(g.ruleId)}">Toggle all</button>
         <span class="sz">${esc(g.totalHuman)}</span>
       </div><div class="rows">
+      <p class="pathline">${esc(g.base)}</p>
       ${g.note ? `<p class="note">${esc(g.note)}</p>` : ''}
       ${g.blocked ? `<p class="note">${esc(g.blocked)}</p>` : ''}
       ${g.entries.map((e) => cardRow({
         ruleId: g.ruleId, label: e.name, path: e.path,
         size: e.size, sizeHuman: e.sizeHuman,
-        regen: g.regen, safe: g.safe && !g.blocked,
+        regen: g.regen, safe: g.safe, blocked: !!g.blocked,
       }, 'cache')).join('')}
       </div></div>`;
   }
   return h + '</div>';
 }
 
+/** Turn "iOS-26-5" into "iOS 26.5" for display. */
+function prettyRuntime(rt) {
+  const m = /^(\w+)-(\d+)-(\d+)$/.exec(rt);
+  return m ? `${m[1]} ${m[2]}.${m[3]}` : rt;
+}
+
 function renderSims(s) {
   if (!s || !s.available) return '';
+
+  // Group by runtime so a whole iOS version can be selected in one click.
+  const groups = new Map();
+  for (const d of s.devices) {
+    if (!groups.has(d.runtime)) {
+      groups.set(d.runtime, { runtime: d.runtime, devices: [], total: 0, unavailable: 0 });
+    }
+    const g = groups.get(d.runtime);
+    g.devices.push(d);
+    g.total += d.size;
+    if (!d.available) g.unavailable += 1;
+  }
+  const ordered = [...groups.values()].sort((a, b) => b.total - a.total);
+
   let h = `<div class="sec"><h2>iOS Simulators
-    <span class="tot">${esc(s.totalHuman || '')}, ${s.devices.length} devices</span></h2>
+    <span class="tot">${esc(s.totalHuman || '')}, ${s.devices.length} devices,
+    ${ordered.length} runtimes</span></h2>
     <p class="hint">Deleted through <code>simctl</code>, never by removing files.
-      "Unavailable" devices belong to runtimes you no longer have installed.</p>
+      "Unavailable" devices belong to runtimes you no longer have installed, so
+      they cannot boot.</p>
+    <p class="pathline">${esc(s.devicesRoot || '')}</p>
     <div class="toolbar">
       <button class="sm" id="delUnavail" ${s.unavailableCount ? '' : 'disabled'}>
-        Delete ${s.unavailableCount} unavailable</button></div>`;
-  const open = openCards.has('sims') ? ' open' : '';
-  h += `<div class="card${open}" data-card="sims">
-    <div class="card-head" data-toggle="sims">
-      <span class="chev">${open ? '▾' : '▸'}</span>
-      <span class="nm">All simulators</span>
-      <span class="sz">${esc(s.totalHuman || '')}</span>
-    </div><div class="rows">`;
-  for (const d of s.devices) {
-    h += `<div class="row${d.available ? '' : ' unsafe'}">
-      <input type="checkbox" data-sim="${esc(d.udid)}" data-size="${d.size}" />
-      <span class="lbl">${esc(d.name)}</span>
-      <span class="rg">${esc(d.runtime)}</span>
-      ${d.available ? '' : '<span class="tag warn">unavailable</span>'}
-      <span class="sz">${esc(d.sizeHuman)}</span></div>`;
+        Delete ${s.unavailableCount} unavailable</button>
+      <span class="vsep"></span>
+      <button class="sm" data-simall="1">Select all</button>
+      <button class="sm" data-simnone="1">Deselect all</button>
+    </div>`;
+
+  for (const g of ordered) {
+    const key = `sim:${g.runtime}`;
+    const open = openCards.has(key) ? ' open' : '';
+    h += `<div class="card${open}" data-card="${esc(key)}">
+      <div class="card-head" data-toggle="${esc(key)}">
+        <span class="chev">${open ? '▾' : '▸'}</span>
+        <span class="nm">${esc(prettyRuntime(g.runtime))}</span>
+        <span class="tag">${g.devices.length} devices</span>
+        ${g.unavailable ? `<span class="tag warn">${g.unavailable} unavailable</span>` : ''}
+        <button class="sm" data-simtoggle="${esc(key)}">Toggle all</button>
+        <span class="sz">${human(g.total)}</span>
+      </div><div class="rows">`;
+    for (const d of g.devices.slice().sort((a, b) => b.size - a.size)) {
+      h += `<div class="row${d.available ? '' : ' unsafe'}">
+        <input type="checkbox" data-sim="${esc(d.udid)}" data-size="${d.size}" />
+        <span class="lbl">${esc(d.name)}</span>
+        ${d.available ? '' : '<span class="tag warn">unavailable</span>'}
+        <span class="sz">${esc(d.sizeHuman)}</span></div>`;
+    }
+    h += `</div></div>`;
   }
-  h += `</div></div><div class="toolbar">
+
+  h += `<div class="toolbar">
     <button class="sm danger" id="delSims" disabled>Delete checked simulators…</button>
     </div></div>`;
   return h;
@@ -436,7 +538,10 @@ function renderEmus(e) {
       <span class="tag">${esc(a.wipeableHuman)} wipeable</span>
       <button class="sm" data-wipe="${esc(a.name)}" ${e.running ? 'disabled' : ''}>
         Wipe data…</button>
-      <span class="sz">${esc(a.sizeHuman)}</span></div></div>`;
+      <span class="sz">${esc(a.sizeHuman)}</span></div>
+      <div class="rows" style="display:block">
+        <p class="pathline">${esc(a.path)}</p>
+      </div></div>`;
   }
   return h + '</div>';
 }
@@ -548,8 +653,10 @@ $('lockBtn').onclick = async () => {
 };
 $('clearSel').onclick = () => {
   sel.clear();
-  document.querySelectorAll('input[data-path]').forEach((c) => (c.checked = false));
+  document.querySelectorAll('input[data-path]').forEach((c) => { c.checked = false; });
+  document.querySelectorAll('input[data-sim]').forEach((c) => { c.checked = false; });
   refreshFooter();
+  refreshSimBtn();
 };
 $('expandAll').onclick = () => {
   document.querySelectorAll('.card').forEach((c) => {
@@ -566,9 +673,34 @@ $('collapseAll').onclick = () => {
   });
 };
 
-/** The method picker, shown inside the confirmation modal. */
+/**
+ * The method picker, shown inside the confirmation modal.
+ *
+ * The advisory note is method-specific. The slow-Trash warning only appears
+ * while Trash is actually selected, because a warning about a path you are not
+ * taking is noise, and noise trains people to ignore real warnings.
+ */
 function methodPickerHtml(size, items) {
-  const slow = size >= SLOW_TRASH_BYTES || isNodeModulesHeavy(items);
+  const trashHostile = size >= SLOW_TRASH_BYTES || isNodeModulesHeavy(items);
+  const allRegenerable = items.length > 0 && items.every((i) => i.safe !== false);
+
+  let note = '';
+  if (deleteMode === 'trash' && trashHostile) {
+    note = `<p class="slowwarn"><b>Trash will be slow here.</b> This selection
+      includes folders with a very large number of small files, which Finder
+      moves one by one. Expect several minutes, and no space is freed until you
+      empty the Trash. Permanent delete is usually better for build output,
+      since it regenerates.</p>`;
+  } else if (deleteMode === 'permanent' && allRegenerable) {
+    note = `<p class="okwarn"><b>This cannot be undone.</b> Everything selected
+      is regenerable build output or a cache, so the only cost of being wrong is
+      the time to rebuild or re-download.</p>`;
+  } else if (deleteMode === 'permanent') {
+    note = `<p class="slowwarn"><b>This cannot be undone, and the selection
+      includes items marked "review".</b> Those are not automatically
+      regenerable, so check the list below before continuing.</p>`;
+  }
+
   return `
     <div class="methods">
       <label class="method ${deleteMode === 'trash' ? 'on' : ''}" data-mode="trash">
@@ -576,24 +708,19 @@ function methodPickerHtml(size, items) {
           ${deleteMode === 'trash' ? 'checked' : ''} />
         <span class="mt">Move to Trash
           <span class="badge">recoverable</span></span>
-        <span class="md">You can restore it from the Trash.
-          Slow for folders with many small files, and it keeps using disk
-          space until you empty the Trash.</span>
+        <span class="md">Restorable from the Trash. Slow for folders with many
+          small files, and the space stays used until you empty it.</span>
       </label>
       <label class="method perm ${deleteMode === 'permanent' ? 'on' : ''}" data-mode="permanent">
         <input type="radio" name="delmode" value="permanent"
           ${deleteMode === 'permanent' ? 'checked' : ''} />
         <span class="mt">Delete permanently
           <span class="badge">final</span></span>
-        <span class="md">Frees the space immediately and is much faster.
-          Cannot be undone. Fine for build output, which regenerates.</span>
+        <span class="md">Frees space immediately and is much faster.
+          Cannot be undone.</span>
       </label>
     </div>
-    ${slow ? `<p class="slowwarn"><b>Heads up:</b> this selection contains
-      folders with a very large number of small files (node_modules and build
-      output). Moving those to the Trash can take many minutes and will not
-      free any space until you empty the Trash. Permanent delete is usually the
-      better choice here, since these directories regenerate.</p>` : ''}`;
+    ${note}`;
 }
 
 $('deleteBtn').onclick = () => {
@@ -666,6 +793,7 @@ document.addEventListener('change', (e) => {
     toggleSel({
       kind: t.dataset.kind, ruleId: t.dataset.rule,
       path: t.dataset.path, size: Number(t.dataset.size) || 0,
+      safe: t.dataset.safe === '1',
     }, t.checked);
   }
   if (t.matches('input[data-sim]')) refreshSimBtn();
@@ -684,28 +812,73 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  if (t.dataset.selproj) {
-    const card = document.querySelector(`[data-card="${CSS.escape(t.dataset.selproj)}"]`);
-    card.querySelectorAll('input[data-path]').forEach((c) => {
-      c.checked = true;
-      c.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+  // Toggle every row in one card: selects all, or clears all if already full.
+  if (t.dataset.seltoggle) {
+    const card = document.querySelector(`[data-card="${CSS.escape(t.dataset.seltoggle)}"]`);
+    if (!card) return;
+    const boxes = [...card.querySelectorAll('input[data-path]:not(:disabled)')];
+    const allOn = boxes.length > 0 && boxes.every((c) => c.checked);
+    setBoxes(boxes, !allOn);
     return;
   }
 
-  if (t.id === 'selAllProj') {
-    document.querySelectorAll('input[data-kind="project"]').forEach((c) => {
-      c.checked = true;
-      c.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+  if (t.dataset.selall) {
+    setBoxes(
+      document.querySelectorAll(`input[data-kind="${t.dataset.selall}"]:not(:disabled)`),
+      true,
+    );
     return;
   }
 
-  if (t.id === 'selNodeMods') {
-    document.querySelectorAll('input[data-rule="node_modules"]').forEach((c) => {
-      c.checked = true;
-      c.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+  if (t.dataset.deselall) {
+    setBoxes(
+      document.querySelectorAll(`input[data-kind="${t.dataset.deselall}"]`),
+      false,
+    );
+    return;
+  }
+
+  // Everything the tool considers automatically regenerable.
+  if (t.dataset.selsafe) {
+    setBoxes(
+      document.querySelectorAll(
+        `input[data-kind="${t.dataset.selsafe}"][data-safe="1"]:not(:disabled)`,
+      ),
+      true,
+    );
+    return;
+  }
+
+  if (t.dataset.selrule) {
+    setBoxes(
+      document.querySelectorAll(
+        `input[data-rule="${CSS.escape(t.dataset.selrule)}"]:not(:disabled)`,
+      ),
+      true,
+    );
+    return;
+  }
+
+  // Simulator selection: whole runtime group, or everything.
+  if (t.dataset.simtoggle) {
+    const card = document.querySelector(`[data-card="${CSS.escape(t.dataset.simtoggle)}"]`);
+    if (!card) return;
+    const boxes = [...card.querySelectorAll('input[data-sim]')];
+    const allOn = boxes.length > 0 && boxes.every((c) => c.checked);
+    boxes.forEach((c) => { c.checked = !allOn; });
+    refreshSimBtn();
+    return;
+  }
+
+  if (t.dataset.simall) {
+    document.querySelectorAll('input[data-sim]').forEach((c) => { c.checked = true; });
+    refreshSimBtn();
+    return;
+  }
+
+  if (t.dataset.simnone) {
+    document.querySelectorAll('input[data-sim]').forEach((c) => { c.checked = false; });
+    refreshSimBtn();
     return;
   }
 
@@ -780,6 +953,33 @@ document.addEventListener('click', async (e) => {
         await scan();
       },
     });
+  }
+});
+
+/* ------------------------------------------------------------- shortcuts */
+
+document.addEventListener('keydown', (e) => {
+  // Never hijack typing in the confirmation field.
+  if (e.target.matches('input[type=text], textarea')) {
+    if (e.key === 'Escape') $('modalBg').classList.remove('show');
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  const modalOpen = $('modalBg').classList.contains('show');
+  if (e.key === 'Escape') {
+    if (modalOpen) $('modalBg').classList.remove('show');
+    return;
+  }
+  if (modalOpen) return; // don't run page shortcuts behind a dialog
+
+  switch (e.key.toLowerCase()) {
+    case 'r': e.preventDefault(); scan(); break;
+    case 'e': $('expandAll').click(); break;
+    case 'c': $('collapseAll').click(); break;
+    case 'd': $('clearSel').click(); break;
+    case 'm': $('switchMode').click(); break;
+    default: break;
   }
 });
 
