@@ -83,6 +83,37 @@ for (const base of S.RULE_BASES) {
   check(`refuse container ${base}`, base, [base], false);
 }
 
+console.log('\n== Build caches every RN project depends on must be refused ==');
+// These sit inside directories that rules DO enumerate (~/.gradle/caches,
+// ~/Library/Caches), so a loosened childPattern could expose them. Pin them.
+for (const [label, p, root] of [
+  ['ccache store', path.join(HOME, 'Library', 'Caches', 'ccache'),
+    path.join(HOME, 'Library', 'Caches')],
+  ['gradle modules-2', path.join(HOME, '.gradle', 'caches', 'modules-2'),
+    path.join(HOME, '.gradle', 'caches')],
+  ['gradle build-cache-1', path.join(HOME, '.gradle', 'caches', 'build-cache-1'),
+    path.join(HOME, '.gradle', 'caches')],
+  ['gradle init scripts', path.join(HOME, '.gradle', 'init.d'),
+    path.join(HOME, '.gradle')],
+  ['ccache config', path.join(HOME, 'Library', 'Preferences', 'ccache'),
+    path.join(HOME, 'Library', 'Preferences')],
+]) {
+  check(`refuse ${label}`, p, [root], false);
+}
+{
+  const gradleRule = S.ABSOLUTE_RULES.find((r) => r.id === 'gradle_caches_version');
+  for (const name of ['modules-2', 'build-cache-1']) {
+    const offered = gradleRule.childPattern.test(name);
+    if (offered) {
+      console.log(`FAIL  gradle_caches_version offers ${name}`);
+      failures += 1;
+    } else {
+      console.log(`ok    gradle_caches_version does not offer ${name}`);
+      passes += 1;
+    }
+  }
+}
+
 console.log('\n== Traversal, symlinks, and malformed input must be refused ==');
 check('null byte', `${SANDBOX}/proj\0/node_modules`, [SANDBOX], false);
 check('relative escape to home',

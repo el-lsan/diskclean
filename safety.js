@@ -60,6 +60,10 @@ const PROTECTED_EXACT = new Set(
     path.join(HOME, '.gradle', 'wrapper'),
     path.join(HOME, '.gradle', 'wrapper', 'dists'),
     path.join(HOME, '.gradle', 'daemon'),
+    // Machine-wide build setup (see README, "Build caches this tool must keep").
+    path.join(HOME, '.gradle', 'init.d'),
+    path.join(HOME, '.gradle', 'gradle.properties'),
+    path.join(HOME, 'Library', 'Caches', 'ccache'),
     path.join(HOME, 'Library', 'Developer', 'Xcode'),
     path.join(HOME, 'Library', 'Developer', 'Xcode', 'DerivedData'),
     path.join(HOME, 'Library', 'Developer', 'Xcode', 'iOS DeviceSupport'),
@@ -386,11 +390,14 @@ const ABSOLUTE_RULES = [
     label: 'Gradle version caches',
     base: path.join(HOME, '.gradle', 'caches'),
     children: true,
-    // Only version-numbered dirs and known transient caches.
-    childPattern: /^(\d+\.\d+(\.\d+)?|build-cache-\d+|jars-\d+|transforms-\d+|journal-\d+|kotlin-dsl|modules-2)$/,
-    regen: 'gradle re-downloads on next build',
+    // Only version-numbered dirs and known transient caches. Deliberately NOT
+    // modules-2 (every downloaded dependency, ~2.5 GB, minutes to re-fetch)
+    // and NOT build-cache-1 (the shared Kotlin/Java/dex task cache that makes
+    // rebuilds across projects fast). Both are listed under REPORT_ONLY.
+    childPattern: /^(\d+\.\d+(\.\d+)?|jars-\d+|transforms-\d+|journal-\d+|kotlin-dsl)$/,
+    regen: 'gradle re-extracts on next build',
     safe: true,
-    note: 'Version dirs for Gradle releases you no longer use are pure waste.',
+    note: 'Version dirs for Gradle releases you no longer use are pure waste. The current version dir is mostly `transforms` (unpacked AARs); deleting it costs a few minutes of re-extraction, no recompiling.',
   },
   {
     id: 'gradle_wrapper_dists',
@@ -602,6 +609,27 @@ const ABSOLUTE_RULES = [
 
 /** Reports only. Never deletable through this tool. */
 const REPORT_ONLY = [
+  {
+    id: 'ccache',
+    label: 'ccache (compiled C++ for every React Native Android build)',
+    base: path.join(HOME, 'Library', 'Caches', 'ccache'),
+    reason:
+      'This is the machine-wide compiler cache wired into every Android build by ~/.gradle/init.d/ccache.gradle. It is what turns a 20-40 minute native rebuild of mmkv, reanimated, worklets, nitro and friends into seconds after a project build directory is deleted. It is capped (ccache --show-config) and evicts old objects itself. Delete project build dirs freely instead; never this. See README, "Build caches this tool must keep".',
+  },
+  {
+    id: 'gradle_modules',
+    label: 'Gradle dependency downloads (modules-2)',
+    base: path.join(HOME, '.gradle', 'caches', 'modules-2'),
+    reason:
+      'Every downloaded dependency jar/aar (react-android, hermes, AndroidX, Firebase) for all projects. Deleting it saves little and forces a full re-download on the next build of each project. Gradle prunes unused entries after 30 days on its own.',
+  },
+  {
+    id: 'gradle_build_cache',
+    label: 'Gradle build cache (build-cache-1)',
+    base: path.join(HOME, '.gradle', 'caches', 'build-cache-1'),
+    reason:
+      'Shared Kotlin/Java/dex task outputs, enabled for all projects by org.gradle.caching=true in ~/.gradle/gradle.properties. Small, and it is exactly what makes a rebuild after cleaning a project fast. Gradle prunes it after 7 days unused.',
+  },
   {
     id: 'telegram_db',
     label: 'Telegram message database',
