@@ -76,6 +76,8 @@ const PROTECTED_EXACT = new Set(
     path.join(HOME, 'Library', 'Caches', 'CocoaPods'),
     path.join(HOME, 'Library', 'Caches', 'ReactNative'),
     path.join(HOME, 'Library', 'Caches', 'Yarn'),
+    path.join(HOME, '.codex'),
+    path.join(HOME, '.codex', 'sessions'),
   ].map((p) => path.resolve(p)),
 );
 
@@ -105,6 +107,8 @@ const PROTECTED_PREFIXES = [
   path.join(HOME, '.ssh') + path.sep,
   path.join(HOME, '.gnupg') + path.sep,
   path.join(HOME, 'Library', 'CloudStorage') + path.sep,
+  // Codex chat history. Only ~/.codex/generated_images is ever offered.
+  path.join(HOME, '.codex', 'sessions') + path.sep,
 ];
 
 /** Names that must never appear as a path segment of a delete target. */
@@ -588,6 +592,20 @@ const ABSOLUTE_RULES = [
     childPattern: /^[A-Za-z0-9._-]+$/,
     regen: 'npx playwright install',
     safe: true,
+  },
+  {
+    id: 'codex_generated_images',
+    label: 'Codex generated images',
+    // One folder per chat. The chat itself lives in ~/.codex/sessions and
+    // thread_history_*.sqlite, which no rule reaches.
+    base: path.join(HOME, '.codex', 'generated_images'),
+    children: true,
+    childPattern: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    regen: 'NOT regenerable, re-running a prompt gives different images',
+    safe: false,
+    note:
+      'Images Codex generated in one chat. The chat text and context are kept, '
+      + 'only the image files go. Save any image you want to keep first.',
   },
   {
     id: 'telegram_temp',

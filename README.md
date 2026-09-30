@@ -89,6 +89,10 @@ weights), LM Studio models, PyTorch hub, uv, pip and Playwright browsers. LM
 Studio models are listed individually as `publisher/model`, so you can drop one
 model without touching the rest.
 
+**Codex generated images.** `~/.codex/generated_images`, one folder per chat.
+Only the images go; the chats and their context (`~/.codex/sessions`,
+`thread_history_*.sqlite`) are never offered.
+
 **iOS Simulators.** Grouped by runtime with per-group totals, so a whole iOS
 version can be cleared at once, and flagging devices whose runtime is no longer
 installed (they cannot boot, so they are pure waste). Deletion goes through

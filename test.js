@@ -114,6 +114,20 @@ for (const [label, p, root] of [
   }
 }
 
+{
+  const codex = S.ABSOLUTE_RULES.find((r) => r.id === 'codex_generated_images');
+  for (const [name, want] of [
+    ['01a08085-2f30-7991-a774-a4112b13f071', true],
+    ['sessions', false], ['..', false], ['thread_history_1.sqlite', false],
+  ]) {
+    const ok = codex.childPattern.test(name) === want;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  codex_generated_images ${want ? 'offers' : 'does not offer'} ${name}`);
+    ok ? (passes += 1) : (failures += 1);
+  }
+}
+check('refuse codex chat history', path.join(HOME, '.codex', 'sessions'),
+  [path.join(HOME, '.codex')], false);
+
 console.log('\n== Traversal, symlinks, and malformed input must be refused ==');
 check('null byte', `${SANDBOX}/proj\0/node_modules`, [SANDBOX], false);
 check('relative escape to home',
