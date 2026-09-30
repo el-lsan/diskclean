@@ -1331,7 +1331,10 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'Path not found.' });
         return;
       }
-      await execFileAsync('open', ['-R', p], { timeout: 10000 }).catch(() => {});
+      // Open a plain folder to show its contents. Anything with an extension
+      // (a file, or a bundle like .app that `open` would launch) is only revealed.
+      const isDir = (await fsp.stat(p)).isDirectory() && path.extname(p) === '';
+      await execFileAsync('open', isDir ? [p] : ['-R', p], { timeout: 10000 }).catch(() => {});
       sendJson(res, 200, { ok: true });
       return;
     }

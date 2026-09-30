@@ -68,7 +68,8 @@
     padding: 8px 14px 8px 34px; border-bottom: 1px solid var(--line); }
   .row:last-child { border-bottom: 0; }
   .row .lbl { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12.5px; }
+    font-size: 12.5px; cursor: pointer; }
+  .row .lbl:hover { text-decoration: underline; }
   .row .rg { color: var(--dim); font-size: 11.5px; }
   .row .sz { margin-left: auto; color: var(--dim);
     font-variant-numeric: tabular-nums; font-size: 12.5px; }
@@ -449,7 +450,7 @@ function cardRow(item, kind) {
     <input type="checkbox" data-kind="${esc(kind)}" data-rule="${esc(item.ruleId)}"
       data-path="${esc(item.path)}" data-size="${item.size}"
       data-safe="${item.safe === false ? '0' : '1'}" ${checked} ${disabled} />
-    <span class="lbl">${esc(item.label)}</span>
+    <span class="lbl" data-reveal="${esc(item.path)}" title="Open in Finder">${esc(item.label)}</span>
     ${item.regen ? `<span class="rg">${esc(item.regen)}</span>` : ''}
     ${item.safe === false ? '<span class="tag warn">review</span>' : ''}
     <span class="sz">${esc(item.sizeHuman)}</span>
@@ -1001,6 +1002,11 @@ document.addEventListener('change', (e) => {
 
 document.addEventListener('click', async (e) => {
   const t = e.target;
+
+  if (t.dataset.reveal) {
+    api('/api/reveal', { method: 'POST', body: JSON.stringify({ path: t.dataset.reveal }) });
+    return;
+  }
 
   const tog = t.closest('[data-toggle]');
   if (tog && !t.closest('button') && !t.matches('input')) {
