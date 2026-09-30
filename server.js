@@ -216,7 +216,7 @@ async function hasCommand(name) {
   if (binCache.has(name)) return binCache.get(name);
   let ok = false;
   try {
-    await execFileAsync('command', ['-v', name], { shell: '/bin/sh', timeout: 5000 });
+    await execFileAsync('which', [name], { timeout: 5000 });
     ok = true;
   } catch {
     ok = false;
