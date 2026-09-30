@@ -420,7 +420,7 @@ function setBoxes(boxes, on) {
       ruleId: c.dataset.rule,
       path: c.dataset.path,
       size: Number(c.dataset.size) || 0,
-      safe: c.dataset.safe === '1',
+      safe: c.dataset.safe === '1', app: c.dataset.app || null,
     };
     if (on) sel.set(item.path, item);
     else sel.delete(item.path);
@@ -449,10 +449,11 @@ function cardRow(item, kind) {
   return `<div class="row${unsafe}${item.blocked ? ' blocked' : ''}">
     <input type="checkbox" data-kind="${esc(kind)}" data-rule="${esc(item.ruleId)}"
       data-path="${esc(item.path)}" data-size="${item.size}"
-      data-safe="${item.safe === false ? '0' : '1'}" ${checked} ${disabled} />
+      data-safe="${item.safe === false ? '0' : '1'}" data-app="${esc(item.app || '')}" ${checked} ${disabled} />
     <span class="lbl" data-reveal="${esc(item.path)}" title="Open in Finder">${esc(item.label)}</span>
     ${item.regen ? `<span class="rg">${esc(item.regen)}</span>` : ''}
     ${item.safe === false ? '<span class="tag warn">review</span>' : ''}
+    ${item.app ? `<span class="tag">quit ${esc(item.app)} first</span>` : ''}
     ${item.backup && !item.blocked ? `<button class="sm" data-backup="${esc(item.path)}"
       data-rule="${esc(item.ruleId)}" data-tags="${esc(item.backup.tags)}"
       data-label="${esc(item.label)}">Backup &amp; delete</button>` : ''}
@@ -521,6 +522,7 @@ function renderCaches(list) {
         ruleId: g.ruleId, label: e.name, path: e.path,
         size: e.size, sizeHuman: e.sizeHuman,
         regen: g.regen, safe: g.safe, blocked: !!g.blocked, backup: g.backup,
+        app: g.requireAppClosed,
       }, 'cache')).join('')}
       </div></div>`;
   }
@@ -976,8 +978,33 @@ $('deleteBtn').onclick = () => {
       },
     });
   }
-  open();
+  whenAppsClosed(items, open);
 };
+
+/**
+ * Some caches belong to an app that must be closed first (Chrome, Cursor).
+ * Ask until it is, then continue. The server re-checks at delete time too.
+ */
+async function whenAppsClosed(items, proceed) {
+  const apps = [...new Set(items.map((i) => i.app).filter(Boolean))];
+  if (!apps.length) return proceed();
+  const r = await api('/api/apps-running', { method: 'POST', body: JSON.stringify({ apps }) });
+  const running = (r.body && r.body.running) || [];
+  if (!running.length) return proceed();
+  const names = running.join(' and ');
+  confirmModal({
+    title: `Quit ${names} first`,
+    bodyHtml: `<p>${esc(names)} ${running.length > 1 ? 'are' : 'is'} running. Its cache is in
+      use, so clearing it now can break the app or get rewritten straight away.</p>
+      <p style="margin-top:10px">Quit it (⌘Q, not just closing the window), then press
+      <b>Check again</b>.</p>`,
+    okLabel: 'Check again',
+    requirePhrase: null,
+    onModeChange: null,
+    onOk: () => whenAppsClosed(items, proceed),
+  });
+  $('mOk').className = 'primary';
+}
 
 /**
  * Upload one folder to the Telegram channel, then delete it. The server
@@ -1062,7 +1089,7 @@ document.addEventListener('change', (e) => {
     toggleSel({
       kind: t.dataset.kind, ruleId: t.dataset.rule,
       path: t.dataset.path, size: Number(t.dataset.size) || 0,
-      safe: t.dataset.safe === '1',
+      safe: t.dataset.safe === '1', app: t.dataset.app || null,
     }, t.checked);
   }
   if (t.matches('input[data-sim]')) refreshSimBtn();

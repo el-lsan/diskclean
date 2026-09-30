@@ -239,12 +239,37 @@ async function telegramTests() {
   ok('a failed trash call counts as failed, not deleted', r4.deleted === 0 && r4.failed > 0);
 }
 
-/** Emptying a children:false cache keeps the folder and never follows links. */
-async function contentsTests() {
+/** New cache rules: exact names only, app data stays out of reach. */
+async function cacheRuleTests() {
   const ok = (desc, cond) => {
     console.log(`${cond ? 'ok  ' : 'FAIL'}  ${desc}`);
     cond ? (passes += 1) : (failures += 1);
   };
+  const rule = (id) => S.ABSOLUTE_RULES.find((r) => r.id === id);
+
+  console.log('\n== New cache rules offer only cache folders ==');
+  const cursor = rule('cursor_caches').childPattern;
+  ok('cursor offers CachedData, Cache, logs',
+    ['CachedData', 'Cache', 'logs', 'Code Cache'].every((n) => cursor.test(n)));
+  ok('cursor never offers User, WebStorage, Partitions, CachedProfilesData',
+    ['User', 'WebStorage', 'Partitions', 'CachedProfilesData', 'extensions'].every((n) => !cursor.test(n)));
+  const chrome = rule('chrome_cache').childPattern;
+  ok('chrome offers profile caches',
+    ['Default', 'Profile 1', 'Profile 10'].every((n) => chrome.test(n)));
+  ok('chrome never offers other names', ['Profile', 'Crashpad', '..'].every((n) => !chrome.test(n)));
+  ok('maestro offers only run folders',
+    rule('maestro_tests').childPattern.test('2026-09-16_200336')
+    && !rule('maestro_tests').childPattern.test('config'));
+  for (const p of [
+    path.join(HOME, 'Library', 'Application Support', 'Cursor', 'User'),
+    path.join(HOME, 'Library', 'Application Support', 'Google', 'Chrome'),
+  ]) {
+    const g = S.validateDeletion(p, [path.dirname(p)]);
+    ok(`refuse app data ${p.replace(HOME, '~')}`, !g.ok);
+  }
+  ok('chrome and cursor rules require the app closed',
+    rule('chrome_cache').requireAppClosed === 'Google Chrome'
+    && rule('cursor_caches').requireAppClosed === 'Cursor');
 
   console.log('\n== Emptying a folder keeps the folder and never follows links ==');
   const base = path.join(SANDBOX, 'contents');
@@ -265,7 +290,7 @@ async function contentsTests() {
     (await S.contentsToDelete(base, ['../precious-target'])).items.length === 0);
 }
 
-telegramTests().then(contentsTests).then(() => {
+telegramTests().then(cacheRuleTests).then(() => {
   teardown();
   console.log(`\n${passes} passed, ${failures} failed\n`);
   process.exit(failures > 0 ? 1 : 0);

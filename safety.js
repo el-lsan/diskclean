@@ -109,6 +109,9 @@ const PROTECTED_PREFIXES = [
   path.join(HOME, 'Library', 'CloudStorage') + path.sep,
   // Codex chat history. Only ~/.codex/generated_images is ever offered.
   path.join(HOME, '.codex', 'sessions') + path.sep,
+  // App data next to caches we clear: settings, chats, profiles, logins.
+  path.join(HOME, 'Library', 'Application Support', 'Cursor', 'User') + path.sep,
+  path.join(HOME, 'Library', 'Application Support', 'Google') + path.sep,
 ];
 
 /** Names that must never appear as a path segment of a delete target. */
@@ -592,6 +595,78 @@ const ABSOLUTE_RULES = [
     childPattern: /^[A-Za-z0-9._-]+$/,
     regen: 'npx playwright install',
     safe: true,
+  },
+  {
+    id: 'puppeteer_cache',
+    label: 'Puppeteer browsers',
+    // browser/version, so old Chrome builds can go while the pinned one stays.
+    base: path.join(HOME, '.cache', 'puppeteer'),
+    children: true,
+    childDepth: 2,
+    childPattern: /^(chrome|chrome-headless-shell|chromium|firefox)$/,
+    regen: 're-downloaded on npm install',
+    safe: true,
+    note: 'Each project pins one browser version. Old versions are safe to remove; a project that needs one re-downloads it on npm install.',
+  },
+  {
+    id: 'yarn_berry_cache',
+    label: 'Yarn (2+) global cache',
+    base: path.join(HOME, '.yarn', 'berry', 'cache'),
+    children: false,
+    regen: 'yarn re-downloads',
+    safe: true,
+  },
+  {
+    id: 'bun_cache',
+    label: 'bun install cache',
+    base: path.join(HOME, '.bun', 'install', 'cache'),
+    children: false,
+    regen: 'bun re-downloads',
+    safe: true,
+  },
+  {
+    id: 'homebrew_cache',
+    label: 'Homebrew downloads',
+    base: path.join(HOME, 'Library', 'Caches', 'Homebrew'),
+    children: false,
+    regen: 'brew re-downloads when needed',
+    safe: true,
+    note: 'Downloaded bottles and casks. Installed packages are not affected. `brew cleanup --prune=all` does the same.',
+  },
+  {
+    id: 'chrome_cache',
+    label: 'Chrome cache',
+    // One entry per Chrome profile. Only the web cache: bookmarks, passwords,
+    // history and logins live in Application Support and are never touched.
+    base: path.join(HOME, 'Library', 'Caches', 'Google', 'Chrome'),
+    children: true,
+    childPattern: /^(Default|Profile \d+|Guest Profile|System Profile)$/,
+    regen: 'rebuilt while browsing',
+    safe: true,
+    note: 'Web cache only. Bookmarks, passwords, history and logins are not in here. Pages load a little slower until the cache refills.',
+    requireAppClosed: 'Google Chrome',
+  },
+  {
+    id: 'cursor_caches',
+    label: 'Cursor caches and logs',
+    base: path.join(HOME, 'Library', 'Application Support', 'Cursor'),
+    children: true,
+    // Only these names. Settings, extension state and chats (User/) never match.
+    childPattern: /^(Cache|CachedData|CachedExtensionVSIXs|Code Cache|GPUCache|DawnGraphiteCache|DawnWebGPUCache|logs)$/,
+    regen: 'rebuilt by Cursor',
+    safe: true,
+    note: 'Cursor settings, extensions, chats and logins are not touched.',
+    requireAppClosed: 'Cursor',
+  },
+  {
+    id: 'maestro_tests',
+    label: 'Maestro test runs',
+    base: path.join(HOME, '.maestro', 'tests'),
+    children: true,
+    childPattern: /^\d{4}-\d{2}-\d{2}_\d{6}$/,
+    regen: 'old run logs and screenshots, not regenerated',
+    safe: true,
+    note: 'Screenshots and logs from past Maestro runs, one row per run. Nothing needs them to run tests again.',
   },
   {
     id: 'codex_generated_images',

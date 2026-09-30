@@ -576,16 +576,13 @@ async function scanCaches({ force = false } = {}) {
 
     if (entries.length === 0) return null;
 
+    // A running app is not a block here: the page asks you to quit it when you
+    // delete, and the delete itself re-checks. Only an unprovable state blocks.
     let blocked = null;
-    if (rule.requireAppClosed) {
-      if (!(await hasCommand('pgrep'))) {
-        // We cannot prove the app is closed, so do not offer the deletion.
-        blocked =
-          `Cannot check whether ${rule.requireAppClosed} is running on this `
-          + 'machine (pgrep not available), so this is left alone.';
-      } else if (await isAppRunning(rule.requireAppClosed)) {
-        blocked = `${rule.requireAppClosed} is running. Quit it before clearing.`;
-      }
+    if (rule.requireAppClosed && !(await hasCommand('pgrep'))) {
+      blocked =
+        `Cannot check whether ${rule.requireAppClosed} is running on this `
+        + 'machine (pgrep not available), so this is left alone.';
     }
 
     const total = entries.reduce((a, b) => a + b.size, 0);
@@ -600,6 +597,7 @@ async function scanCaches({ force = false } = {}) {
       note: rule.note || null,
       // Offered only for rules that opt in and when a bot is configured.
       backup: rule.backup && TG.loadConfig() ? { tags: rule.backup.tags } : null,
+      requireAppClosed: rule.requireAppClosed || null,
       blocked,
       entries,
       total,
@@ -1482,6 +1480,17 @@ const server = http.createServer(async (req, res) => {
       );
       send({ type: 'complete', ...filesResult(again.resolved, removed), inTrash: body.useTrash });
       res.end();
+      return;
+    }
+
+    // Which of the given apps are running. Only names some rule declares are checked.
+    if (req.method === 'POST' && route === '/api/apps-running') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const known = new Set(S.ABSOLUTE_RULES.map((r) => r.requireAppClosed).filter(Boolean));
+      const apps = (Array.isArray(body.apps) ? body.apps : []).filter((a) => known.has(a));
+      const running = [];
+      for (const a of apps) if (await isAppRunning(a)) running.push(a);
+      sendJson(res, 200, { running });
       return;
     }
 

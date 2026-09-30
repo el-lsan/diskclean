@@ -80,9 +80,16 @@ every `node_modules` across all projects at once.
 
 **Global caches.** Gradle version caches and wrapper distributions, Xcode
 DerivedData and iOS DeviceSupport, Android NDK / system-images / build-tools,
-CocoaPods, npm, Yarn, React Native and Metro. Gradle's `modules-2` (downloaded
-dependencies) and `build-cache-1` (shared task cache) are shown but not
-offered, see [Build caches this tool must keep](#build-caches-this-tool-must-keep).
+CocoaPods, npm, Yarn (classic and 2+), bun, Homebrew downloads, React Native,
+Metro, Puppeteer browsers (one row per version) and old Maestro test runs.
+Gradle's `modules-2` (downloaded dependencies) and `build-cache-1` (shared task
+cache) are shown but not offered, see [Build caches this tool must keep](#build-caches-this-tool-must-keep).
+
+**App caches.** Chrome's web cache (one row per profile) and Cursor's caches and
+logs. Only cache folders are matched by name, never profiles, settings, chats or
+logins. These apps must be closed: when you delete, the page asks you to quit
+the app and checks again before it continues, and the server refuses if the app
+is still running.
 
 **AI model caches.** Hugging Face hub (where diffusers and MFLUX keep model
 weights), LM Studio models, PyTorch hub, uv, pip and Playwright browsers. LM
