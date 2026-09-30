@@ -90,8 +90,41 @@ Studio models are listed individually as `publisher/model`, so you can drop one
 model without touching the rest.
 
 **Codex generated images.** `~/.codex/generated_images`, one folder per chat.
-Only the images go; the chats and their context (`~/.codex/sessions`,
-`thread_history_*.sqlite`) are never offered.
+Only the image files go. The chat folder itself stays (Codex may reference it),
+and the chats and their context (`~/.codex/sessions`, `thread_history_*.sqlite`)
+are never offered.
+
+**Backup to Telegram.** Codex image folders get a "Backup & delete" button once
+Telegram is set up. It asks for a caption (prefilled with `#codex #ai_images`),
+uploads every file as an original document in albums of 10, with the caption on
+each album, then deletes the uploaded files using the current delete method. The
+folder stays. Uploads go over MTProto (Telethon, `tg_upload.py`), so files up to
+2 GB work, not the 50 MB cap of the HTTP Bot API.
+
+Nothing is deleted unless every album was confirmed by Telegram with each file's
+exact size and the browser stayed connected; otherwise the panel says why. Even
+then only the confirmed files are removed, and only if each still has the size
+and modified time it had when uploaded, so a file added or changed during the
+upload is kept. A failed run starts over, so the channel can get duplicates of
+the parts that were already sent.
+
+Setup:
+
+1. Create a bot with @BotFather and copy its token. Add it to your channel as an
+   admin that can post messages.
+2. Get an `api_id` and `api_hash` at https://my.telegram.org (API development tools).
+3. Install Telethon next to the tool: `python3 -m venv .venv && .venv/bin/pip install telethon`
+4. Write `~/.config/diskclean/telegram.json`, then `chmod 600` it:
+
+   ```json
+   { "api_id": 123456, "api_hash": "0123...", "token": "123456:ABC...", "chat": "-100xxxxxxxxxx" }
+   ```
+
+   `chat` is the channel id (`-100...`), or `@name` for a public channel. For a
+   private channel, forward one of its posts to @userinfobot, or read
+   `channel_post.chat.id` from `https://api.telegram.org/bot<token>/getUpdates`
+   after posting in it. The bot's login session is saved next to the config as
+   `telegram.session`.
 
 **iOS Simulators.** Grouped by runtime with per-group totals, so a whole iOS
 version can be cleared at once, and flagging devices whose runtime is no longer

@@ -175,7 +175,72 @@ if (fs.existsSync(shelfifyNm)) {
     [path.join(HOME, 'Documents', 'Github')], true);
 }
 
-teardown();
+/** Telegram backup against a fake worker: anything short of full acceptance must throw. */
+async function telegramTests() {
+  console.log('\n== Telegram backup uploads everything or throws ==');
+  const TG = require('./telegram');
+  const dir = path.join(SANDBOX, 'tg');
+  fs.mkdirSync(dir);
+  for (let i = 0; i < 23; i += 1) fs.writeFileSync(path.join(dir, `img${i}.png`), 'x');
+  fs.writeFileSync(path.join(dir, '.DS_Store'), 'x');
+  const ok = (desc, cond) => {
+    console.log(`${cond ? 'ok  ' : 'FAIL'}  ${desc}`);
+    cond ? (passes += 1) : (failures += 1);
+  };
+  const fake = (reply) => ({ calls: 0, async send(paths) { this.calls += 1; return reply(paths); } });
+  const throws = async (worker) => {
+    try { await TG.backupFolder(dir, '#t', { worker }); return false; } catch { return true; }
+  };
 
-console.log(`\n${passes} passed, ${failures} failed\n`);
-process.exit(failures > 0 ? 1 : 0);
+  const sizesOf = (paths) => paths.map((p) => fs.statSync(p).size);
+  const all = fake(sizesOf);
+  const r = await TG.backupFolder(dir, '#t', { worker: all });
+  ok('uploads all 23 files in 3 albums, skips .DS_Store', r.files.length === 23 && all.calls === 3);
+  ok('a rejected album throws, so the folder is not deleted',
+    await throws(fake(() => { throw new Error('bad'); })));
+  ok('a partly accepted album throws', await throws(fake((p) => sizesOf(p).slice(1))));
+  ok('a file stored with the wrong size throws',
+    await throws(fake((p) => sizesOf(p).map((n, k) => (k === 0 ? n + 1 : n)))));
+  ok('a worker reply without sizes throws', await throws(fake(() => undefined)));
+  ok('albums never leave a lone file at the end',
+    JSON.stringify(TG.chunk(Array(21).fill(0)).map((a) => a.length)) === '[10,9,2]');
+
+  console.log('\n== After a backup, only the confirmed files are deleted ==');
+  const late = path.join(dir, 'late.png');
+  const up = await TG.backupFolder(dir, '#t', {
+    worker: fake((p) => {
+      if (!fs.existsSync(late)) fs.writeFileSync(late, 'new');
+      return sizesOf(p);
+    }),
+  });
+  ok('a file added during the upload is not in the delete list',
+    !up.files.some((f) => f.path === late));
+
+  fs.mkdirSync(path.join(dir, 'sub'));
+  fs.writeFileSync(path.join(dir, 'sub', 'deep.png'), 'x');
+  const changed = up.files[0].path;
+  fs.writeFileSync(changed, 'changed after upload');
+  const outside = { path: path.join(SANDBOX, 'outside.png'), size: 1, mtimeMs: 0 };
+  fs.writeFileSync(outside.path, 'x');
+  outside.mtimeMs = fs.statSync(outside.path).mtimeMs;
+
+  const r2 = await S.removeListedFiles(dir, [...up.files, outside], null);
+  ok('uploaded, unchanged files are deleted', r2.deleted === up.files.length - 1 && r2.failed === 0);
+  ok('a file changed after upload is kept', fs.existsSync(changed));
+  ok('a file added during the upload is kept', fs.existsSync(late));
+  ok('a listed file outside the folder is kept', fs.existsSync(outside.path) && r2.kept === 2);
+  ok('the folder and its subfolders stay', fs.existsSync(path.join(dir, 'sub', 'deep.png')));
+
+  const trashed = [];
+  const r3 = await S.removeListedFiles(dir, await S.listFiles(dir), async (p) => { trashed.push(...p); });
+  ok('trash mode hands files to the trash function and never unlinks',
+    r3.deleted === trashed.length && fs.existsSync(late));
+  const r4 = await S.removeListedFiles(dir, await S.listFiles(dir), async () => { throw new Error('no'); });
+  ok('a failed trash call counts as failed, not deleted', r4.deleted === 0 && r4.failed > 0);
+}
+
+telegramTests().then(() => {
+  teardown();
+  console.log(`\n${passes} passed, ${failures} failed\n`);
+  process.exit(failures > 0 ? 1 : 0);
+});

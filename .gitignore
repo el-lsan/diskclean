@@ -3,3 +3,5 @@ node_modules/
 *.log
 scratch/
 tmp/
+.venv/
+__pycache__/

@@ -604,8 +604,13 @@ const ABSOLUTE_RULES = [
     regen: 'NOT regenerable, re-running a prompt gives different images',
     safe: false,
     note:
-      'Images Codex generated in one chat. The chat text and context are kept, '
-      + 'only the image files go. Save any image you want to keep first.',
+      'Images Codex generated in one chat. Only the image files go: the chat, its '
+      + 'context and the folder itself stay. Save any image you want to keep first, '
+      + 'or use Backup & delete.',
+    // Delete the files inside, never the chat's folder (Codex may reference it).
+    keepFolder: true,
+    // "Backup & delete" uploads the folder to Telegram first (see telegram.js).
+    backup: { tags: '#codex #ai_images' },
   },
   {
     id: 'telegram_temp',
@@ -791,8 +796,63 @@ function validateDeletion(targetPath, allowedRoots) {
   return { ok: true, resolved: real };
 }
 
+/** Every regular file under dir (symlinks skipped, .DS_Store ignored), sorted. */
+async function listFiles(dir) {
+  const out = [];
+  for (const e of await fs.promises.readdir(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isSymbolicLink() || e.name === '.DS_Store') continue;
+    if (e.isDirectory()) out.push(...(await listFiles(p)));
+    else if (e.isFile()) {
+      const st = await fs.promises.stat(p);
+      out.push({ path: p, size: st.size, mtimeMs: st.mtimeMs });
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * Delete exactly the listed files inside dir, keeping every folder. A file is
+ * kept unless it is still a regular file under dir with the same size and
+ * mtime it had when listed, so a file that changed or appeared since (and so
+ * was not backed up) is never removed. `trash(paths)` moves a batch to the
+ * Trash; without it files are unlinked.
+ */
+async function removeListedFiles(dir, files, trash) {
+  const root = path.resolve(dir) + path.sep;
+  const go = [];
+  let kept = 0;
+  for (const f of files) {
+    const p = path.resolve(f.path);
+    let st = null;
+    try { st = await fs.promises.lstat(p); } catch { /* gone */ }
+    const same = st && st.isFile() && st.size === f.size && st.mtimeMs === f.mtimeMs;
+    if (!p.startsWith(root) || !same) kept += 1;
+    else go.push({ path: p, size: f.size });
+  }
+
+  let deleted = 0;
+  let freed = 0;
+  const errors = [];
+  const step = trash ? 200 : 1;
+  for (let i = 0; i < go.length; i += step) {
+    const batch = go.slice(i, i + step);
+    try {
+      if (trash) await trash(batch.map((f) => f.path));
+      else await fs.promises.unlink(batch[0].path);
+      deleted += batch.length;
+      freed += batch.reduce((a, f) => a + f.size, 0);
+    } catch (err) {
+      errors.push(String(err.message || err));
+    }
+  }
+  return { deleted, kept, failed: go.length - deleted, freed, error: errors[0] || null };
+}
+
 module.exports = {
   HOME,
+  listFiles,
+  removeListedFiles,
   RULE_BASES,
   isRuleBase,
   PROJECT_RULES,

@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 
 const S = require('./safety');
 const AUTH = require('./auth');
+const TG = require('./telegram');
 
 const PORT = Number(process.env.DISKCLEAN_PORT || 4173);
 const HOST = '127.0.0.1';
@@ -597,6 +598,8 @@ async function scanCaches({ force = false } = {}) {
       regen: rule.regen,
       safe: rule.safe,
       note: rule.note || null,
+      // Offered only for rules that opt in and when a bot is configured.
+      backup: rule.backup && TG.loadConfig() ? { tags: rule.backup.tags } : null,
       blocked,
       entries,
       total,
@@ -811,6 +814,18 @@ async function trashPath(p) {
   await execFileAsync('osascript', ['-e', script], { timeout: 120000 });
 }
 
+/** Move many files to the Trash in one Finder call (one call per file is very slow). */
+async function trashPaths(paths) {
+  if (!IS_MAC) throw new Error('Moving to Trash is only supported on macOS.');
+  if (paths.some((p) => /["\\]/.test(p))) {
+    throw new Error('Refusing to trash a path containing quotes or backslashes.');
+  }
+  const list = paths.map((p) => `POSIX file "${p}"`).join(', ');
+  await execFileAsync('osascript', ['-e', `tell application "Finder" to delete {${list}}`], {
+    timeout: 600000,
+  });
+}
+
 /** Resolve the allowed roots for a given rule id. */
 function allowedRootsForRule(ruleId, kind) {
   if (kind === 'project') {
@@ -913,22 +928,54 @@ async function verifyCacheTarget(ruleId, targetPath) {
   return null;
 }
 
-/**
- * Perform one deletion request. Always validated, never shelled out with
- * an interpolated path.
- */
-async function performDelete({ kind, ruleId, targetPath, useTrash }) {
+/** Shape a removeListedFiles result like a performDelete result. */
+function filesResult(dir, r) {
+  sizeCache.delete(dir);
+  sizeCache.delete(path.dirname(dir));
+  sizeCache.delete(path.dirname(path.dirname(dir)));
+  return {
+    path: dir,
+    ok: r.failed === 0,
+    error: r.failed ? `${r.failed} file(s) could not be removed: ${r.error}` : null,
+    freed: r.freed,
+    freedHuman: humanBytes(r.freed),
+    deleted: r.deleted,
+    kept: r.kept,
+  };
+}
+
+/** Every check a delete must pass. Returns {resolved} or {error}. */
+async function validateTarget({ kind, ruleId, targetPath }) {
   const roots = allowedRootsForRule(ruleId, kind);
-  if (!roots) return { path: targetPath, ok: false, error: 'Unknown rule id.' };
+  if (!roots) return { error: 'Unknown rule id.' };
 
   const gate = S.validateDeletion(targetPath, roots);
-  if (!gate.ok) return { path: targetPath, ok: false, error: gate.reason };
+  if (!gate.ok) return { error: gate.reason };
 
   const specific =
     kind === 'project'
       ? await verifyProjectTarget(ruleId, gate.resolved)
       : await verifyCacheTarget(ruleId, gate.resolved);
-  if (specific) return { path: targetPath, ok: false, error: specific };
+  if (specific) return { error: specific };
+  return { resolved: gate.resolved };
+}
+
+/**
+ * Perform one deletion request. Always validated, never shelled out with
+ * an interpolated path.
+ */
+async function performDelete({ kind, ruleId, targetPath, useTrash }) {
+  const gate = await validateTarget({ kind, ruleId, targetPath });
+  if (gate.error) return { path: targetPath, ok: false, error: gate.error };
+
+  // Rules like Codex images empty the folder but keep it in place.
+  const rule = kind === 'cache' && S.ABSOLUTE_RULES.find((r) => r.id === ruleId);
+  if (rule && rule.keepFolder) {
+    const r = await S.removeListedFiles(
+      gate.resolved, await S.listFiles(gate.resolved), useTrash ? trashPaths : null,
+    );
+    return filesResult(gate.resolved, r);
+  }
 
   const size = await dirSize(gate.resolved);
 
@@ -1075,6 +1122,7 @@ const MUTATING = new Set([
   '/api/delete',
   '/api/simulator/delete',
   '/api/emulator/wipe',
+  '/api/backup',
 ]);
 
 const server = http.createServer(async (req, res) => {
@@ -1322,6 +1370,70 @@ const server = http.createServer(async (req, res) => {
       for (const n of names) results.push(await wipeEmulator(n));
       const freed = results.filter((r) => r.ok).reduce((a, b) => a + (b.freed || 0), 0);
       sendJson(res, 200, { results, freed, freedHuman: humanBytes(freed) });
+      return;
+    }
+
+    /*
+     * Upload a folder to Telegram, then delete it. Streams NDJSON progress like
+     * /api/delete. The folder is deleted only if every file was uploaded.
+     */
+    if (req.method === 'POST' && route === '/api/backup') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const rule = S.ABSOLUTE_RULES.find((r) => r.id === body.ruleId);
+      const cfg = TG.loadConfig();
+      const caption = String(body.caption || '').trim();
+      let error = null;
+      if (!rule || !rule.backup) error = 'This item cannot be backed up.';
+      else if (!cfg) error = `Telegram backup is not set up (see README, ${TG.CONFIG_PATH}).`;
+      else if (typeof body.useTrash !== 'boolean') error = 'useTrash must be true or false.';
+      else if (caption.length > TG.MAX_CAPTION - 100) error = 'Caption is too long.';
+      // Same gate as a delete, before a single byte leaves the machine.
+      const gate = error ? null : await validateTarget({
+        kind: 'cache', ruleId: rule.id, targetPath: body.path,
+      });
+      if (gate && gate.error) error = gate.error;
+      if (error) {
+        sendJson(res, 400, { error });
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Accel-Buffering': 'no',
+      });
+      const send = (obj) => res.write(`${JSON.stringify(obj)}\n`);
+      let aborted = false;
+      // req never emits 'close' once its body is read; res does, on disconnect.
+      res.on('close', () => { if (!res.writableFinished) aborted = true; });
+
+      let uploaded = null;
+      try {
+        const up = await TG.backupFolder(gate.resolved, caption, {
+          onProgress: (p) => send({ type: 'upload', ...p, sentHuman: humanBytes(p.sentBytes) }),
+          isAborted: () => aborted,
+        });
+        uploaded = up.files;
+        send({ type: 'uploaded', files: uploaded.length, bytesHuman: humanBytes(up.bytes) });
+      } catch (err) {
+        send({ type: 'complete', ok: false, error: `${err.message} Nothing was deleted.` });
+        res.end();
+        return;
+      }
+
+      // Re-check the target, then delete only the files Telegram confirmed.
+      // The folder, and anything added or changed during the upload, stay.
+      const again = await validateTarget({ kind: 'cache', ruleId: rule.id, targetPath: gate.resolved });
+      if (again.error) {
+        send({ type: 'complete', ok: false, error: `${again.error} Backed up, but nothing was deleted.` });
+        res.end();
+        return;
+      }
+      const removed = await S.removeListedFiles(
+        again.resolved, uploaded, body.useTrash ? trashPaths : null,
+      );
+      send({ type: 'complete', ...filesResult(again.resolved, removed), inTrash: body.useTrash });
+      res.end();
       return;
     }
 

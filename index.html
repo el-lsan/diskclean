@@ -453,6 +453,9 @@ function cardRow(item, kind) {
     <span class="lbl" data-reveal="${esc(item.path)}" title="Open in Finder">${esc(item.label)}</span>
     ${item.regen ? `<span class="rg">${esc(item.regen)}</span>` : ''}
     ${item.safe === false ? '<span class="tag warn">review</span>' : ''}
+    ${item.backup && !item.blocked ? `<button class="sm" data-backup="${esc(item.path)}"
+      data-rule="${esc(item.ruleId)}" data-tags="${esc(item.backup.tags)}"
+      data-label="${esc(item.label)}">Backup &amp; delete</button>` : ''}
     <span class="sz">${esc(item.sizeHuman)}</span>
   </div>`;
 }
@@ -517,7 +520,7 @@ function renderCaches(list) {
       ${g.entries.map((e) => cardRow({
         ruleId: g.ruleId, label: e.name, path: e.path,
         size: e.size, sizeHuman: e.sizeHuman,
-        regen: g.regen, safe: g.safe, blocked: !!g.blocked,
+        regen: g.regen, safe: g.safe, blocked: !!g.blocked, backup: g.backup,
       }, 'cache')).join('')}
       </div></div>`;
   }
@@ -976,6 +979,71 @@ $('deleteBtn').onclick = () => {
   open();
 };
 
+/**
+ * Upload one folder to the Telegram channel, then delete it. The server
+ * deletes only after every file was accepted, so a failed upload keeps it.
+ */
+async function backupAndDelete({ backup: path, rule, tags, label }) {
+  const caption = prompt(
+    `Back up ${label} to Telegram, then ${deleteMode === 'trash' ? 'move its files to Trash' : 'delete its files'}. The folder stays.\n\n`
+    + 'Caption for the upload (edit or add text):',
+    `${tags}\n`,
+  );
+  if (caption === null) return;
+
+  prog.open(0, `Backing up ${label}`);
+  if (!(await ensureAuth(`back up and delete ${label}`))) {
+    prog.note('Authorization cancelled. Nothing was uploaded or deleted.');
+    $('pClose').disabled = false;
+    return;
+  }
+  prog.note('Preparing upload…');
+  setStatus('Backing up to Telegram…', true);
+
+  let summary = null;
+  let uploaded = false;
+  try {
+    await postStream('/api/backup', {
+      ruleId: rule, path, caption, useTrash: deleteMode === 'trash',
+    }, (msg) => {
+      if (msg.type === 'upload') {
+        $('pTotal').textContent = msg.total;
+        $('pCount').textContent = msg.sent;
+        $('pFill').style.width = `${Math.round((msg.sentBytes / Math.max(msg.totalBytes, 1)) * 100)}%`;
+        prog.note(msg.phase === 'login'
+          ? 'Connecting to Telegram…'
+          : msg.wait
+            ? `Telegram rate limit: waiting ${msg.wait}s, then continuing…`
+            : `Uploading to Telegram: ${msg.sent} of ${msg.total} files (${msg.sentHuman})`);
+      } else if (msg.type === 'uploaded') {
+        uploaded = true;
+        prog.note(`Uploaded ${msg.files} files (${msg.bytesHuman}). Deleting…`);
+      } else if (msg.type === 'complete') summary = msg;
+    });
+  } catch (err) {
+    summary = { ok: false, error: err.message };
+  }
+
+  if (summary && summary.ok) {
+    prog.finish({
+      okCount: 1, failCount: 0, freedHuman: summary.freedHuman,
+      inTrash: summary.inTrash, aborted: false,
+    });
+    const kept = summary.kept
+      ? ` ${summary.kept} file(s) changed during the upload and were kept.` : '';
+    prog.note(`Backed up ${summary.deleted} files and freed ${summary.freedHuman}. Folder kept.${kept}`);
+    setStatus(`Backed up ${summary.deleted} files, freed ${summary.freedHuman}. Folder kept.${kept}`);
+    await scan();
+  } else {
+    const msg = (summary && summary.error) || 'Stopped. The folder was not deleted.';
+    $('pTitle').textContent = uploaded ? 'Backed up, but not deleted' : 'Backup failed';
+    $('pFill').className = '';
+    prog.note(msg);
+    $('pClose').disabled = false;
+    setStatus(msg);
+  }
+}
+
 /** Bottom-bar switch, opens the same picker without a selection. */
 $('switchMode').onclick = () => {
   confirmModal({
@@ -1002,6 +1070,11 @@ document.addEventListener('change', (e) => {
 
 document.addEventListener('click', async (e) => {
   const t = e.target;
+
+  if (t.dataset.backup) {
+    backupAndDelete(t.dataset);
+    return;
+  }
 
   if (t.dataset.reveal) {
     api('/api/reveal', { method: 'POST', body: JSON.stringify({ path: t.dataset.reveal }) });
