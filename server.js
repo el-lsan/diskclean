@@ -928,6 +928,48 @@ async function verifyCacheTarget(ruleId, targetPath) {
   return null;
 }
 
+/**
+ * Empty a children:false rule's base, keeping the base itself. The gate never
+ * allows a rule base as a target, so each direct child goes through it instead.
+ */
+async function deleteContents(rule, useTrash) {
+  const base = rule.base;
+  if (rule.requireAppClosed && (await isAppRunning(rule.requireAppClosed))) {
+    return { path: base, ok: false, error: `${rule.requireAppClosed} is running. Quit it first.` };
+  }
+  let names;
+  try {
+    names = await fsp.readdir(base);
+  } catch (err) {
+    return { path: base, ok: false, error: String(err.message || err) };
+  }
+
+  const { items: ok, links, errors } = await S.contentsToDelete(base, names);
+
+  const before = await dirSize(base);
+  for (const l of links) await fsp.unlink(l).catch((err) => errors.push(String(err.message)));
+  const step = useTrash ? 200 : 1;
+  for (let i = 0; i < ok.length; i += step) {
+    const batch = ok.slice(i, i + step);
+    try {
+      if (useTrash) await trashPaths(batch);
+      else await fsp.rm(batch[0], { recursive: true, force: false, maxRetries: 2 });
+    } catch (err) {
+      errors.push(String(err.message || err));
+    }
+  }
+  sizeCache.delete(base);
+  sizeCache.delete(path.dirname(base));
+  const freed = Math.max(0, before - (await dirSize(base)));
+  return {
+    path: base,
+    ok: errors.length === 0,
+    error: errors.length ? `${errors.length} item(s) not removed: ${errors[0]}` : null,
+    freed,
+    freedHuman: humanBytes(freed),
+  };
+}
+
 /** Shape a removeListedFiles result like a performDelete result. */
 function filesResult(dir, r) {
   sizeCache.delete(dir);
@@ -965,6 +1007,12 @@ async function validateTarget({ kind, ruleId, targetPath }) {
  * an interpolated path.
  */
 async function performDelete({ kind, ruleId, targetPath, useTrash }) {
+  const contentsRule = kind === 'cache'
+    && S.ABSOLUTE_RULES.find((r) => r.id === ruleId && !r.children);
+  if (contentsRule && path.resolve(String(targetPath || '')) === contentsRule.base) {
+    return deleteContents(contentsRule, useTrash);
+  }
+
   const gate = await validateTarget({ kind, ruleId, targetPath });
   if (gate.error) return { path: targetPath, ok: false, error: gate.error };
 

@@ -849,9 +849,35 @@ async function removeListedFiles(dir, files, trash) {
   return { deleted, kept, failed: go.length - deleted, freed, error: errors[0] || null };
 }
 
+/**
+ * Split a children:false base's entries into what may be deleted: `items` pass
+ * the gate as direct children, `links` are symlinks (unlink the link only,
+ * never follow), `errors` explain anything refused.
+ */
+async function contentsToDelete(base, names) {
+  const items = [];
+  const links = [];
+  const errors = [];
+  for (const n of names) {
+    const p = path.join(base, n);
+    let st = null;
+    try { st = await fs.promises.lstat(p); } catch { /* gone */ }
+    if (!st) continue;
+    if (st.isSymbolicLink()) {
+      if (path.dirname(p) === base) links.push(p);
+      continue;
+    }
+    const gate = validateDeletion(p, [base]);
+    if (gate.ok && path.dirname(gate.resolved) === base) items.push(gate.resolved);
+    else errors.push(gate.reason || `Not a direct child: ${n}`);
+  }
+  return { items, links, errors };
+}
+
 module.exports = {
   HOME,
   listFiles,
+  contentsToDelete,
   removeListedFiles,
   RULE_BASES,
   isRuleBase,

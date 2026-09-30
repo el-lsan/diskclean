@@ -239,7 +239,33 @@ async function telegramTests() {
   ok('a failed trash call counts as failed, not deleted', r4.deleted === 0 && r4.failed > 0);
 }
 
-telegramTests().then(() => {
+/** Emptying a children:false cache keeps the folder and never follows links. */
+async function contentsTests() {
+  const ok = (desc, cond) => {
+    console.log(`${cond ? 'ok  ' : 'FAIL'}  ${desc}`);
+    cond ? (passes += 1) : (failures += 1);
+  };
+
+  console.log('\n== Emptying a folder keeps the folder and never follows links ==');
+  const base = path.join(SANDBOX, 'contents');
+  fs.mkdirSync(path.join(base, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'a.zip'), 'x');
+  const target = path.join(SANDBOX, 'precious-target');
+  fs.writeFileSync(target, 'keep me');
+  fs.symlinkSync(target, path.join(base, 'link'));
+  const c = await S.contentsToDelete(base, fs.readdirSync(base));
+  ok('files and folders inside are listed',
+    c.items.includes(path.join(base, 'a.zip')) && c.items.includes(path.join(base, 'sub')));
+  ok('the base itself is never an item', !c.items.includes(base));
+  ok('a symlink is listed as a link to unlink, not as an item to trash or rm',
+    c.links.length === 1 && !c.items.some((p) => p.endsWith('link')));
+  fs.unlinkSync(c.links[0]);
+  ok('unlinking the link leaves its target intact', fs.readFileSync(target, 'utf8') === 'keep me');
+  ok('a crafted ../ name is refused',
+    (await S.contentsToDelete(base, ['../precious-target'])).items.length === 0);
+}
+
+telegramTests().then(contentsTests).then(() => {
   teardown();
   console.log(`\n${passes} passed, ${failures} failed\n`);
   process.exit(failures > 0 ? 1 : 0);
