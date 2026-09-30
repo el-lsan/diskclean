@@ -561,6 +561,9 @@ function renderSims(s) {
     <div class="toolbar">
       <button class="sm" id="delUnavail" ${s.unavailableCount ? '' : 'disabled'}>
         Delete ${s.unavailableCount} unavailable</button>
+      <button class="sm" id="delSimRec" ${s.recordings ? '' : 'disabled'}
+        title="UI test screen recordings left by XCTest and Maestro. The simulators stay.">
+        Delete test recordings (${human(s.recordings || 0)})</button>
       <span class="vsep"></span>
       <button class="sm" data-simall="1">Select all</button>
       <button class="sm" data-simnone="1">Deselect all</button>
@@ -583,6 +586,7 @@ function renderSims(s) {
         <input type="checkbox" data-sim="${esc(d.udid)}" data-size="${d.size}" />
         <span class="lbl">${esc(d.name)}</span>
         ${d.available ? '' : '<span class="tag warn">unavailable</span>'}
+        ${d.recordings > 1e8 ? `<span class="tag warn">${human(d.recordings)} test recordings</span>` : ''}
         <span class="sz">${esc(d.sizeHuman)}</span></div>`;
     }
     h += `</div></div>`;
@@ -1207,6 +1211,35 @@ document.addEventListener('click', async (e) => {
         setStatus(res.ok
           ? `Deleted ${res.count} simulators, freed ${res.freedHuman}.`
           : 'Failed: ' + (res.error || 'unknown'));
+        await scan();
+      },
+    });
+    return;
+  }
+
+  if (t.id === 'delSimRec') {
+    const udids = DATA.simulators.devices.filter((d) => d.recordings > 0).map((d) => d.udid);
+    confirmModal({
+      title: 'Delete test screen recordings?',
+      bodyHtml: `<p>Removes the UI test screen recordings that XCTest (and Maestro
+        through it) left inside ${udids.length} simulator(s), about
+        <b>${human(DATA.simulators.recordings)}</b>. The simulators, their apps and
+        data stay. Files written in the last 10 minutes are kept in case a test is
+        still recording. Not recoverable from the Trash.</p>`,
+      requirePhrase: null,
+      onOk: async () => {
+        if (!(await ensureAuth('delete iOS simulator test recordings'))) return;
+        setStatus('Deleting test recordings…', true);
+        const r = await api('/api/simulator/recordings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ udids }),
+        });
+        const res = r.body || {};
+        const failed = (res.results || []).filter((x) => !x.ok);
+        setStatus(`Freed ${res.freedHuman || '0 B'}.`
+          + (res.kept ? ` Kept ${res.kept} recent file(s).` : '')
+          + (failed.length ? ` Failed: ${failed[0].error}` : ''));
         await scan();
       },
     });

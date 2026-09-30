@@ -949,8 +949,38 @@ async function contentsToDelete(base, names) {
   return { items, links, errors };
 }
 
+/**
+ * The folder where testmanagerd (XCTest, and Maestro through it) keeps UI test
+ * screen recordings inside a simulator, or null. They are meant to be removed
+ * after a run but pile up, often tens of GB. The container is found by its
+ * owner id in the metadata plist (a binary plist keeps the id as plain bytes),
+ * never by guessing which InternalDaemon folder it is.
+ */
+async function simRecordingsDir(deviceDir) {
+  const daemons = path.join(deviceDir, 'data', 'Containers', 'Data', 'InternalDaemon');
+  let names;
+  try { names = await fs.promises.readdir(daemons); } catch { return null; }
+  for (const n of names) {
+    const c = path.join(daemons, n);
+    let meta;
+    try {
+      meta = await fs.promises.readFile(
+        path.join(c, '.com.apple.mobile_container_manager.metadata.plist'),
+      );
+    } catch { continue; }
+    if (!meta.includes('com.apple.testmanagerd')) continue;
+    const dir = path.join(c, 'tmp', 'Attachments');
+    try {
+      const st = await fs.promises.lstat(dir);
+      if (st.isDirectory()) return dir;
+    } catch { /* none yet */ }
+  }
+  return null;
+}
+
 module.exports = {
   HOME,
+  simRecordingsDir,
   listFiles,
   contentsToDelete,
   removeListedFiles,

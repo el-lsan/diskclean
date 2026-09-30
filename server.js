@@ -673,6 +673,10 @@ async function listSimulators({ force = false } = {}) {
     const size = all.get(p) || 0;
     return { ...d, path: p, size, sizeHuman: humanBytes(size) };
   });
+  await mapLimit(sized, 4, async (d) => {
+    const dir = await S.simRecordingsDir(d.path);
+    d.recordings = dir ? await dirSize(dir) : 0;
+  });
 
   sized.sort((a, b) => b.size - a.size);
   return {
@@ -682,6 +686,7 @@ async function listSimulators({ force = false } = {}) {
     unavailableCount: sized.filter((d) => !d.available).length,
     total: sized.reduce((a, b) => a + b.size, 0),
     totalHuman: humanBytes(sized.reduce((a, b) => a + b.size, 0)),
+    recordings: sized.reduce((a, b) => a + b.recordings, 0),
   };
 }
 
@@ -1064,6 +1069,30 @@ async function deleteSimulator(udid) {
   return { udid, ok: true, freed: size, freedHuman: humanBytes(size) };
 }
 
+/**
+ * Delete a simulator's UI test screen recordings, keeping the simulator. A file
+ * written in the last few minutes may belong to a test still recording, so it
+ * is kept.
+ */
+const RECORDING_QUIET_MS = 10 * 60 * 1000;
+async function deleteSimRecordings(udid) {
+  if (!/^[0-9A-Fa-f-]{36}$/.test(udid)) {
+    return { udid, ok: false, error: 'Invalid UDID format.' };
+  }
+  const devicesRoot = path.join(S.HOME, 'Library', 'Developer', 'CoreSimulator', 'Devices');
+  const dir = await S.simRecordingsDir(path.join(devicesRoot, udid));
+  if (!dir) return { udid, ok: true, freed: 0, freedHuman: humanBytes(0) };
+  const gate = S.validateDeletion(dir, [devicesRoot]);
+  if (!gate.ok) return { udid, ok: false, error: gate.reason };
+  const cutoff = Date.now() - RECORDING_QUIET_MS;
+  const all = await S.listFiles(gate.resolved);
+  const files = all.filter((f) => f.mtimeMs < cutoff);
+  const r = await S.removeListedFiles(gate.resolved, files, null);
+  r.kept += all.length - files.length;
+  sizeCache.delete(devicesRoot);
+  return { udid, ...filesResult(gate.resolved, r) };
+}
+
 async function deleteUnavailableSimulators() {
   const before = await listSimulators();
   const unavailable = before.devices.filter((d) => !d.available);
@@ -1167,6 +1196,7 @@ let ACTIVE_PORT = PORT;
 const MUTATING = new Set([
   '/api/delete',
   '/api/simulator/delete',
+  '/api/simulator/recordings',
   '/api/emulator/wipe',
   '/api/backup',
 ]);
@@ -1406,6 +1436,17 @@ const server = http.createServer(async (req, res) => {
       for (const u of udids) results.push(await deleteSimulator(u));
       const freed = results.filter((r) => r.ok).reduce((a, b) => a + (b.freed || 0), 0);
       sendJson(res, 200, { results, freed, freedHuman: humanBytes(freed) });
+      return;
+    }
+
+    if (req.method === 'POST' && route === '/api/simulator/recordings') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const udids = Array.isArray(body.udids) ? body.udids : [];
+      const results = [];
+      for (const u of udids) results.push(await deleteSimRecordings(u));
+      const freed = results.filter((r) => r.ok).reduce((a, b) => a + (b.freed || 0), 0);
+      const kept = results.reduce((a, b) => a + (b.kept || 0), 0);
+      sendJson(res, 200, { results, freed, freedHuman: humanBytes(freed), kept });
       return;
     }
 

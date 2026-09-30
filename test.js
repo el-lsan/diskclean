@@ -288,6 +288,21 @@ async function cacheRuleTests() {
   ok('unlinking the link leaves its target intact', fs.readFileSync(target, 'utf8') === 'keep me');
   ok('a crafted ../ name is refused',
     (await S.contentsToDelete(base, ['../precious-target'])).items.length === 0);
+
+  console.log('\n== Simulator test recordings: only the testmanagerd container ==');
+  const dev = path.join(SANDBOX, 'sim-device');
+  const daemons = path.join(dev, 'data', 'Containers', 'Data', 'InternalDaemon');
+  const mkDaemon = (id, owner) => {
+    fs.mkdirSync(path.join(daemons, id, 'tmp', 'Attachments'), { recursive: true });
+    fs.writeFileSync(path.join(daemons, id, '.com.apple.mobile_container_manager.metadata.plist'),
+      `bplist00MCMMetadataIdentifier_${owner}`);
+  };
+  ok('no InternalDaemon folder means no recordings', (await S.simRecordingsDir(dev)) === null);
+  mkDaemon('AAA', 'com.apple.otherd');
+  ok('another daemon\'s Attachments is never offered', (await S.simRecordingsDir(dev)) === null);
+  mkDaemon('BBB', 'com.apple.testmanagerd');
+  ok('the testmanagerd Attachments folder is found',
+    (await S.simRecordingsDir(dev)) === path.join(daemons, 'BBB', 'tmp', 'Attachments'));
 }
 
 telegramTests().then(cacheRuleTests).then(() => {
