@@ -1229,7 +1229,8 @@ const server = http.createServer(async (req, res) => {
         const results = [];
         let freedSoFar = 0;
         let aborted = false;
-        req.on('close', () => { aborted = true; });
+        // req never emits 'close' once its body is read; res does, on disconnect.
+        res.on('close', () => { if (!res.writableFinished) aborted = true; });
 
         for (let i = 0; i < targets.length; i += 1) {
           const t = targets[i];
